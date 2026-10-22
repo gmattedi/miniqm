@@ -39,9 +39,9 @@ _ATOMIC_NUMBERS_BY_SYMBOL: Final[Mapping[str, int]] = immutabledict.immutabledic
 )
 
 _SCALAR_FLOAT_LABELS: Final = (
-    "A",
-    "B",
-    "C",
+    "a",
+    "b",
+    "c",
     "mu",
     "alpha",
     "homo",
@@ -49,13 +49,13 @@ _SCALAR_FLOAT_LABELS: Final = (
     "gap",
     "r2",
     "zpve",
-    "U0",
-    "U",
-    "H",
-    "G",
-    "Cv",
+    "u0",
+    "u",
+    "h",
+    "g",
+    "cv",
 )
-_ATOMIZATION_TARGETS: Final = ("U0", "U", "H", "G")
+_ATOMIZATION_TARGETS: Final = ("u0", "u", "h", "g")
 
 
 def _fetch_text(url: str) -> str:
@@ -68,7 +68,7 @@ def _fetch_text(url: str) -> str:
 
 def _load_atomref() -> dict[str, dict[str, float]]:
     """Loads per-element reference thermochemical energies indexed by symbol."""
-    columns = ("zpve", "U0", "U", "H", "G", "Cv")
+    columns = ("zpve", "u0", "u", "h", "g", "cv")
     atomref_by_symbol: dict[str, dict[str, float]] = {}
     for line in _fetch_text(_ATOMREF_URL).splitlines()[5:10]:
         symbol, *values = line.split()
@@ -107,7 +107,7 @@ def _get_dimenet_split_ids(uncharacterized_ids: frozenset[int]) -> dict[str, tup
 
 
 def _parse_float(token: str) -> float:
-    """Parses a QM9 float token, handling Fortran '*^' exponential notation."""
+    """Parses a QM9 float token, including Fortran exponential notation."""
     return float(token.replace("*^", "e"))
 
 
@@ -115,7 +115,7 @@ def _parse_molecule_xyz(
     xyz_text: str,
     atomref_by_symbol: Mapping[str, Mapping[str, float]],
 ) -> dict[str, object]:
-    """Parses a single QM9 .xyz file into the zero-padded TFDS feature dictionary."""
+    """Parses a single QM9 coordinate block into a zero-padded feature dictionary."""
     lines = xyz_text.splitlines()
     num_atoms = int(lines[0].rstrip())
 
@@ -149,12 +149,12 @@ def _parse_molecule_xyz(
         "index": mol_index,
         "tag": tag,
         "num_atoms": num_atoms,
-        "SMILES": smiles_gdb17,
-        "SMILES_relaxed": smiles_relaxed,
-        "InChI": inchi_corina,
-        "InChI_relaxed": inchi_relaxed,
+        "smiles": smiles_gdb17,
+        "smiles_relaxed": smiles_relaxed,
+        "inchi": inchi_corina,
+        "inchi_relaxed": inchi_relaxed,
         "charges": charges.tolist(),
-        "Mulliken_charges": mulliken_charges.tolist(),
+        "mulliken_charges": mulliken_charges.tolist(),
         "positions": positions.tolist(),
         "frequencies": frequencies,
         **scalar_values,
@@ -166,7 +166,7 @@ def _load_characterized_molecules(
     uncharacterized_ids: frozenset[int],
     atomref_by_symbol: Mapping[str, Mapping[str, float]],
 ) -> dict[int, dict[str, object]]:
-    """Streams the remote .xyz.tar.bz2 archive and parses all characterized molecules."""
+    """Streams the remote molecule archive and parses all characterized entries."""
     _LOGGER.info("Streaming characterized molecules from %s ...", _MOLECULES_URL)
     molecules_by_id: dict[int, dict[str, object]] = {}
 
@@ -211,12 +211,12 @@ def _build_parquet_schema() -> pa.Schema:
             pa.field("index", pa.int64()),
             pa.field("tag", pa.string()),
             pa.field("num_atoms", pa.int64()),
-            pa.field("SMILES", pa.string()),
-            pa.field("SMILES_relaxed", pa.string()),
-            pa.field("InChI", pa.string()),
-            pa.field("InChI_relaxed", pa.string()),
+            pa.field("smiles", pa.string()),
+            pa.field("smiles_relaxed", pa.string()),
+            pa.field("inchi", pa.string()),
+            pa.field("inchi_relaxed", pa.string()),
             pa.field("charges", pa.list_(pa.int64(), _MAX_ATOMS)),
-            pa.field("Mulliken_charges", pa.list_(pa.float32(), _MAX_ATOMS)),
+            pa.field("mulliken_charges", pa.list_(pa.float32(), _MAX_ATOMS)),
             pa.field("positions", pa.list_(pa.list_(pa.float32(), _NUM_COORDS), _MAX_ATOMS)),
             pa.field("frequencies", pa.list_(pa.float32())),
             *scalar_fields,

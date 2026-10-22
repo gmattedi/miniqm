@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "immutabledict>=4.3.1",
     "jax>=0.12.0.1",
+    "jaxtyping>=0.3.11",
     "optax>=0.2.8",
     "pandas>=3.1.0",
     "pyarrow>=26.0.0",
@@ -37,6 +38,8 @@ select = ["ALL"]
 ignore = [
     "COM812",  # Conflicts with ruff format.
     "CPY001",  # No copyright header required.
+    "D105",    # No docstring required on magic methods.
+    "D107",    # No docstring required on __init__.
     "EM101",   # Allow string literals in exception constructors.
     "EM102",   # Allow f-strings in exception constructors.
     "F722",    # Allow jaxtyping shape annotations.
@@ -48,7 +51,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "data/*.py" = ["INP001", "S310"]
-"tests/**/*.py" = ["D", "PLR2004"]
+"**/*_test.py" = ["ANN201", "D", "PLR2004"]
+
+[tool.ruff.lint.flake8-pytest-style]
+parametrize-values-type = "tuple"
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
