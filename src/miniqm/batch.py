@@ -1,6 +1,6 @@
 """2D molecular graph featurization from SMILES and padded batch construction."""
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 import dataclasses
 from typing import Final, override
 
@@ -286,37 +286,3 @@ def collate_batch(
         positions=positions,
         labels=labels,
     )
-
-
-def iter_batches(
-    molecules: Sequence[schema.Molecule],
-    batch_size: int,
-    *,
-    rng: np.random.Generator | None = None,
-    drop_last: bool = False,
-    max_atoms: int = MAX_ATOMS,
-) -> Iterator[Batch]:
-    """Yields padded batches from a sequence of molecules.
-
-    Args:
-        molecules: Dataset of unpadded QM9 molecules.
-        batch_size: Number of molecules per batch.
-        rng: Optional NumPy random generator for shuffling indices before batching.
-        drop_last: Whether to drop the trailing batch if smaller than batch_size.
-        max_atoms: Padded atom dimension.
-
-    Yields:
-        Collated Batch instances.
-    """
-    if batch_size <= 0:
-        raise ValueError(f"Expected positive batch_size, got {batch_size}.")
-
-    num_molecules = len(molecules)
-    indices = rng.permutation(num_molecules) if rng is not None else np.arange(num_molecules)
-
-    for start_idx in range(0, num_molecules, batch_size):
-        batch_indices = indices[start_idx : start_idx + batch_size]
-        if drop_last and batch_indices.size < batch_size:
-            break
-        batch_molecules = tuple(molecules[int(mol_idx)] for mol_idx in batch_indices)
-        yield collate_batch(batch_molecules, max_atoms=max_atoms)

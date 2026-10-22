@@ -198,14 +198,23 @@ def _as_str(value: object) -> str:
     raise TypeError(f"Expected str, got {value!r}.")
 
 
-def load_molecules(parquet_path: pathlib.Path) -> tuple[Molecule, ...]:
-    """Loads all molecules from a QM9 split Parquet file.
+def load_molecules(
+    parquet_path: pathlib.Path,
+    *,
+    max_molecules: int | None = None,
+) -> tuple[Molecule, ...]:
+    """Loads molecules from a QM9 split Parquet file.
 
     Args:
         parquet_path: Path to a QM9 split Parquet file.
+        max_molecules: Optional cap on the number of rows to load.
 
     Returns:
         Unpadded molecules in row order.
     """
+    if max_molecules is not None and max_molecules <= 0:
+        raise ValueError(f"Expected positive max_molecules, got {max_molecules}.")
     table = pq.read_table(parquet_path)
+    if max_molecules is not None:
+        table = table.slice(0, max_molecules)
     return tuple(Molecule.from_row(row) for row in table.to_pylist())

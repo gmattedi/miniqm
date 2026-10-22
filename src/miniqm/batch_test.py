@@ -203,38 +203,6 @@ def test_collate_batch_pads_and_centers_positions():
     assert len(jax.tree.leaves(collated)) == 5
 
 
-def test_iter_batches_shuffles_and_handles_drop_last():
-    molecules = (
-        _make_hf_molecule(offset=0.0),
-        _make_hf_molecule(offset=5.0),
-        _make_hf_molecule(offset=10.0),
-    )
-
-    kept_batches = tuple(
-        batch.iter_batches(
-            molecules,
-            batch_size=2,
-            rng=np.random.default_rng(0),
-            drop_last=False,
-            max_atoms=3,
-        )
-    )
-    dropped_batches = tuple(
-        batch.iter_batches(
-            molecules,
-            batch_size=2,
-            rng=np.random.default_rng(0),
-            drop_last=True,
-            max_atoms=3,
-        )
-    )
-
-    assert len(kept_batches) == 2
-    assert kept_batches[0].positions.shape == (2, 3, 3)
-    assert kept_batches[1].positions.shape == (1, 3, 3)
-    assert len(dropped_batches) == 1
-
-
 def test_featurize_smiles_rejects_invalid_smiles():
     with pytest.raises(ValueError, match="Failed to parse SMILES"):
         batch.featurize_smiles("not_a_smiles")
@@ -246,8 +214,3 @@ def test_collate_batch_validates_preconditions():
 
     with pytest.raises(ValueError, match="exceeding max_atoms=1"):
         batch.collate_batch((_make_hf_molecule(),), max_atoms=1)
-
-
-def test_iter_batches_rejects_non_positive_batch_size():
-    with pytest.raises(ValueError, match="Expected positive batch_size"):
-        next(batch.iter_batches((_make_hf_molecule(),), batch_size=0))
