@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments & caches
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Data & experiment artifacts
+*.parquet
+data/raw/
+checkpoints/
+outputs/
+wandb/
+
+# Editor & OS files
+.DS_Store
+*.swp
+.idea/
+.vscode/

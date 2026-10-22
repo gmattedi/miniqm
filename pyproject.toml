@@ -1,0 +1,60 @@
+[build-system]
+requires = ["uv_build>=0.9.0,<0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "miniqm"
+version = "0.1.0"
+description = "Mini diffusion model for molecular coordinate generation on QM9."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "immutabledict>=4.3.1",
+    "jax>=0.12.0.1",
+    "optax>=0.2.8",
+    "pandas>=3.1.0",
+    "pyarrow>=26.0.0",
+    "rdkit>=2026.9.1",
+    "scikit-learn>=1.9.1",
+    "seaborn>=0.13.2",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0.0",
+    "pytest>=8.0.0",
+    "ruff>=0.17.1",
+    "ty>=0.0.90",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # Conflicts with ruff format.
+    "CPY001",  # No copyright header required.
+    "EM101",   # Allow string literals in exception constructors.
+    "EM102",   # Allow f-strings in exception constructors.
+    "F722",    # Allow jaxtyping shape annotations.
+    "ISC001",  # Conflicts with ruff format.
+    "S101",    # Allow assert for type narrowing and tests.
+    "TRY003",  # Allow descriptive inline messages in built-in exceptions.
+    "UP037",   # Preserve quotes on jaxtyping shape annotations.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"data/*.py" = ["INP001", "S310"]
+"tests/**/*.py" = ["D", "PLR2004"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+
+[tool.ty.rules]
+all = "error"
