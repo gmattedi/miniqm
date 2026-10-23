@@ -1,12 +1,12 @@
 import dataclasses
 import pathlib
 
-import jaxtyping as jt
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from miniqm import jaxtypes as jt
 from miniqm import schema
 
 
@@ -112,37 +112,38 @@ def test_load_molecules_roundtrip(tmp_path: pathlib.Path):
 
 
 @pytest.mark.parametrize(
-    ("atomic_numbers", "positions", "mulliken_charges", "error_match"),
+    ("atomic_numbers", "positions", "mulliken_charges", "expected_error"),
     (
         (
             np.array((), dtype=np.int64),
-            np.zeros((5, 3), dtype=np.float32),
-            np.zeros((5,), dtype=np.float32),
-            "Expected non-empty 1D atomic_numbers",
+            np.zeros((0, 3), dtype=np.float32),
+            np.zeros((0,), dtype=np.float32),
+            ValueError,
         ),
         (
             np.ones((5,), dtype=np.int64),
             np.zeros((4, 3), dtype=np.float32),
             np.zeros((5,), dtype=np.float32),
-            r"Expected positions shape \(5, 3\)",
+            jt.TypeCheckError,
         ),
         (
             np.ones((5,), dtype=np.int64),
             np.zeros((5, 3), dtype=np.float32),
             np.zeros((4,), dtype=np.float32),
-            r"Expected mulliken_charges shape \(5,\)",
+            jt.TypeCheckError,
         ),
     ),
 )
-def test_molecule_post_init_validates_shapes(
+@jt.typed
+def test_molecule_validates_shapes(
     atomic_numbers: jt.Int[np.ndarray, "..."],
     positions: jt.Float[np.ndarray, "..."],
     mulliken_charges: jt.Float[np.ndarray, "..."],
-    error_match: str,
+    expected_error: type[Exception],
 ):
     base_molecule = _make_expected_molecule()
 
-    with pytest.raises(ValueError, match=error_match):
+    with pytest.raises(expected_error, match=r"atomic_numbers|positions|mulliken_charges"):
         dataclasses.replace(
             base_molecule,
             atomic_numbers=atomic_numbers,

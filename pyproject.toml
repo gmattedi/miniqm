@@ -19,6 +19,7 @@ dependencies = [
     "rdkit>=2026.9.1",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
+    "typeguard==2.13.3",
 ]
 
 [dependency-groups]

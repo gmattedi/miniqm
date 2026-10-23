@@ -4,13 +4,12 @@ from collections.abc import Mapping
 import dataclasses
 import enum
 import pathlib
-from typing import Final, Self, override
+from typing import Self, override
 
-import jaxtyping as jt
 import numpy as np
 import pyarrow.parquet as pq
 
-_SPATIAL_DIMS: Final = 3
+from miniqm import jaxtypes as jt
 
 
 class Column(enum.StrEnum):
@@ -102,6 +101,7 @@ class QM9Labels:
         )
 
 
+@jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class Molecule:
     """Single QM9 molecule with unpadded per-atom arrays and scalar labels."""
@@ -118,21 +118,8 @@ class Molecule:
     __hash__ = None
 
     def __post_init__(self) -> None:
-        if self.atomic_numbers.ndim != 1 or self.atomic_numbers.size == 0:
-            raise ValueError(
-                f"Expected non-empty 1D atomic_numbers, got shape {self.atomic_numbers.shape}."
-            )
-        num_atoms = self.atomic_numbers.size
-        if self.positions.shape != (num_atoms, _SPATIAL_DIMS):
-            raise ValueError(
-                f"Expected positions shape ({num_atoms}, {_SPATIAL_DIMS}), "
-                f"got {self.positions.shape}."
-            )
-        if self.mulliken_charges.shape != (num_atoms,):
-            raise ValueError(
-                f"Expected mulliken_charges shape ({num_atoms},), "
-                f"got {self.mulliken_charges.shape}."
-            )
+        if self.atomic_numbers.size == 0:
+            raise ValueError("Expected non-empty atomic_numbers.")
 
     @override
     def __eq__(self, other: object) -> bool:
@@ -181,18 +168,21 @@ class Molecule:
 
 
 def _as_float(value: object) -> float:
+    """Converts a numeric scalar to a Python float."""
     if isinstance(value, int | float | np.floating):
         return float(value)
     raise TypeError(f"Expected float-compatible value, got {value!r}.")
 
 
 def _as_int(value: object) -> int:
+    """Converts an integer scalar to a Python int."""
     if isinstance(value, int | np.integer):
         return int(value)
     raise TypeError(f"Expected int-compatible value, got {value!r}.")
 
 
 def _as_str(value: object) -> str:
+    """Validates that a value is a string."""
     if isinstance(value, str):
         return value
     raise TypeError(f"Expected str, got {value!r}.")

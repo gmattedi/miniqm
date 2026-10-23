@@ -5,11 +5,11 @@ import dataclasses
 from typing import Final, override
 
 import jax
-import jaxtyping as jt
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdDetermineBonds
 
+from miniqm import jaxtypes as jt
 from miniqm import schema
 
 MAX_ATOMS: Final = 29
@@ -32,6 +32,7 @@ _BOND_TYPES: Final = (
 )
 
 
+@jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class GraphFeatures:
     """Unpadded 2D molecular graph features derived from a SMILES structure."""
@@ -51,6 +52,7 @@ class GraphFeatures:
 
 
 @jax.tree_util.register_dataclass
+@jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class Batch:
     """Padded batch of molecular graphs, zero-COM 3D coordinates, and QM9 labels."""
@@ -77,16 +79,19 @@ class Batch:
 
 
 def _one_hot(value: object, choices: Sequence[object]) -> tuple[float, ...]:
+    """Encodes a value as a one-hot tuple over choices."""
     return tuple(1.0 if value == choice else 0.0 for choice in choices)
 
 
 def _one_hot_with_other(value: object, choices: Sequence[object]) -> tuple[float, ...]:
+    """Encodes a value as a one-hot tuple with a trailing catch-all channel."""
     matched = tuple(1.0 if value == choice else 0.0 for choice in choices)
     other = 0.0 if any(matched) else 1.0
     return (*matched, other)
 
 
 def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
+    """Builds the 1D feature vector for a single RDKit atom."""
     cahn_ingold_prelog = atom.GetProp("_CIPCode") if atom.HasProp("_CIPCode") else ""
     chirality_one_hot = (
         1.0 if cahn_ingold_prelog not in _CHIRAL_CODES else 0.0,
@@ -104,6 +109,7 @@ def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
 
 
 def _featurize_rdkit_mol(mol: Chem.Mol) -> GraphFeatures:
+    """Extracts atom and bond feature arrays from an RDKit molecule."""
     Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
     num_atoms = mol.GetNumAtoms()
 
@@ -132,6 +138,7 @@ def _featurize_rdkit_mol(mol: Chem.Mol) -> GraphFeatures:
 
 
 def _mol_from_smiles(smiles: str) -> Chem.Mol | None:
+    """Parses a SMILES string into an RDKit molecule, or None if invalid."""
     # RDKit stubs annotate MolFromSmiles as returning Mol, but it returns None on invalid SMILES.
     mol: Chem.Mol | None = Chem.MolFromSmiles(smiles)
     return mol
@@ -159,6 +166,7 @@ def _try_align_by_heavy_order(
     xyz_hs_per_heavy: Sequence[Sequence[int]],
     xyz_heavy_sig: Sequence[tuple[int, int]],
 ) -> Chem.Mol | None:
+    """Attempts to renumber an RDKit molecule assuming heavy atoms match XYZ order."""
     mol_heavy_atoms = tuple(atom for atom in mol_with_hs.GetAtoms() if atom.GetAtomicNum() > 1)
     mol_heavy_sig = tuple(
         (
@@ -187,6 +195,7 @@ def _try_align_by_substructure(
     molecule: schema.Molecule,
     candidate_mols: Sequence[Chem.Mol],
 ) -> Chem.Mol | None:
+    """Attempts to renumber an RDKit molecule via 3D-inferred bond substructure matching."""
     rw_mol = Chem.RWMol()
     conformer = Chem.Conformer(molecule.num_atoms)
     for atom_idx, atomic_num in enumerate(molecule.atomic_numbers):
@@ -209,6 +218,7 @@ def _try_align_by_substructure(
 
 
 def _parse_aligned_mol(molecule: schema.Molecule) -> Chem.Mol:
+    """Parses a SMILES string and renumbers its atoms to match XYZ coordinate order."""
     xyz_atomic_numbers = tuple(int(atomic_num) for atomic_num in molecule.atomic_numbers)
     xyz_heavy_indices = tuple(
         xyz_idx for xyz_idx, atomic_num in enumerate(xyz_atomic_numbers) if atomic_num > 1
@@ -265,16 +275,17 @@ def featurize_molecule(molecule: schema.Molecule) -> GraphFeatures:
     return _featurize_rdkit_mol(aligned_mol)
 
 
+@jt.typed
 def center_positions(
     positions: jt.Float[np.ndarray, "num_atoms 3"],
 ) -> jt.Float[np.ndarray, "num_atoms 3"]:
     """Subtracts the centroid so coordinates have zero center of mass.
 
     Args:
-        positions: [num_atoms, 3] Cartesian coordinates.
+        positions: Cartesian atomic coordinates.
 
     Returns:
-        Zero-centered [num_atoms, 3] coordinates.
+        Zero-centered coordinates.
     """
     return positions - positions.mean(axis=0, keepdims=True)
 
