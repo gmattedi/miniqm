@@ -28,7 +28,7 @@ _DIMENET_SEED: Final = 42
 _DIMENET_TRAIN_SIZE: Final = 110_000
 _DIMENET_VALIDATION_SIZE: Final = 10_000
 
-_ATOMIC_NUMBERS_BY_SYMBOL: Final[Mapping[str, int]] = immutabledict.immutabledict(
+_ATOMIC_NUMBERS_BY_SYMBOL: Final = immutabledict.immutabledict(
     {
         "H": 1,
         "C": 6,

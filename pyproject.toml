@@ -47,6 +47,7 @@ ignore = [
     "EM102",   # Allow f-strings in exception constructors.
     "F722",    # Allow jaxtyping shape annotations.
     "ISC001",  # Conflicts with ruff format.
+    "PLR0913", # Allow >5 arguments in model/pipeline functions.
     "S101",    # Allow assert for type narrowing and tests.
     "TRY003",  # Allow descriptive inline messages in built-in exceptions.
     "UP037",   # Preserve quotes on jaxtyping shape annotations.

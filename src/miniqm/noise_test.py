@@ -5,12 +5,14 @@ import pytest
 
 from miniqm import noise
 
+_DEFAULT_CFG = noise.DEFAULT_NOISE_CONFIG
+
 
 @pytest.mark.parametrize(
     ("sigma_val", "expected_skip", "expected_out"),
     (
         (0.0, 1.0, 0.0),
-        (noise.SIGMA_DATA, 0.5, noise.SIGMA_DATA / np.sqrt(2.0)),
+        (_DEFAULT_CFG.sigma_data, 0.5, _DEFAULT_CFG.sigma_data / np.sqrt(2.0)),
     ),
     ids=("zero_noise", "unit_data_noise"),
 )
@@ -29,12 +31,12 @@ def test_preconditioning_factors_boundary_values(
 def test_preconditioning_factors_preserve_variance_identities():
     sigma = jnp.geomspace(1e-3, 80.0, 32, dtype=jnp.float32)
     factors = noise.preconditioning_factors(sigma)
-    noisy_var = jnp.square(sigma) + noise.SIGMA_DATA**2
+    noisy_var = jnp.square(sigma) + _DEFAULT_CFG.sigma_data**2
 
     np.testing.assert_allclose(jnp.square(factors.c_in) * noisy_var, 1.0, rtol=1e-5)
     np.testing.assert_allclose(
         jnp.square(factors.c_skip) * noisy_var + jnp.square(factors.c_out),
-        noise.SIGMA_DATA**2,
+        _DEFAULT_CFG.sigma_data**2,
         rtol=1e-5,
     )
     np.testing.assert_allclose(
@@ -51,12 +53,12 @@ def test_rollout_schedule_monotonic_and_endpoints():
     assert schedule.shape == (num_steps + 1,)
     np.testing.assert_allclose(
         schedule[0],
-        noise.SIGMA_DATA * noise.DEFAULT_S_MAX,
+        _DEFAULT_CFG.sigma_data * _DEFAULT_CFG.s_max,
         rtol=1e-5,
     )
     np.testing.assert_allclose(
         schedule[-1],
-        noise.SIGMA_DATA * noise.DEFAULT_S_MIN,
+        _DEFAULT_CFG.sigma_data * _DEFAULT_CFG.s_min,
         rtol=1e-5,
     )
     assert bool(jnp.all(jnp.diff(schedule) < 0.0))
@@ -68,13 +70,13 @@ def test_rollout_schedule_rejects_non_positive_steps():
 
 
 def test_sample_train_sigmas_log_normal_moments():
+    cfg = noise.NoiseConfig(log_sigma_mean=-1.2, log_sigma_std=1.5)
     sigmas = noise.sample_train_sigmas(
         jax.random.key(0),
         (20_000,),
-        mean=-1.2,
-        std=1.5,
+        config=cfg,
     )
-    log_scaled = jnp.log(sigmas / noise.SIGMA_DATA)
+    log_scaled = jnp.log(sigmas / cfg.sigma_data)
 
     assert bool(jnp.all(sigmas > 0.0))
     np.testing.assert_allclose(float(jnp.mean(log_scaled)), -1.2, atol=0.03)
