@@ -175,6 +175,40 @@ def test_featurize_molecule_aligns_inline_bracket_hydrogens():
         assert features.bond_features[1, c_h_idx, 0] == 1.0
 
 
+def test_featurize_molecule_aligns_reordered_smiles_branches():
+    # Propene where XYZ orders carbons as C_methyl (0), C_central (1), C_vinyl (2),
+    # while smiles_relaxed writes the vinyl (=C) branch before the methyl (C) branch.
+    propene = schema.Molecule(
+        index=20,
+        tag="gdb",
+        smiles="CC=C",
+        smiles_relaxed="C(=C)C",
+        atomic_numbers=np.array([6, 6, 6, 1, 1, 1, 1, 1, 1], dtype=np.int64),
+        positions=np.array(
+            [
+                [0.0, 0.0, 0.0],  # C0 methyl (3 Hs: 3, 4, 5)
+                [1.5, 0.0, 0.0],  # C1 central (1 H: 6)
+                [2.8, 0.0, 0.0],  # C2 vinyl (2 Hs: 7, 8)
+                [-0.5, 0.8, 0.0],  # H3 on C0
+                [-0.5, -0.8, 0.0],  # H4 on C0
+                [-0.5, 0.0, 0.8],  # H5 on C0
+                [1.5, 1.0, 0.0],  # H6 on C1
+                [3.3, 0.8, 0.0],  # H7 on C2
+                [3.3, -0.8, 0.0],  # H8 on C2
+            ],
+            dtype=np.float32,
+        ),
+        mulliken_charges=np.zeros((9,), dtype=np.float32),
+        labels=_make_labels(),
+    )
+
+    features = batch.featurize_molecule(propene)
+
+    # C0-C1 is SINGLE (channel 1), C1-C2 is DOUBLE (channel 2).
+    assert features.bond_features[0, 1, 1] == 1.0
+    assert features.bond_features[1, 2, 2] == 1.0
+
+
 def test_collate_batch_pads_and_centers_positions():
     mol = _make_hf_molecule(offset=2.0)
     expected_hf = _make_expected_hf_features()

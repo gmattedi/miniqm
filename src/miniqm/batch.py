@@ -8,6 +8,7 @@ import jax
 import jaxtyping as jt
 import numpy as np
 from rdkit import Chem
+from rdkit.Chem import rdDetermineBonds
 
 from miniqm import schema
 
@@ -152,60 +153,103 @@ def featurize_smiles(smiles: str) -> GraphFeatures:
     return _featurize_rdkit_mol(mol_with_hs)
 
 
+def _try_align_by_heavy_order(
+    mol_with_hs: Chem.Mol,
+    xyz_heavy_indices: Sequence[int],
+    xyz_hs_per_heavy: Sequence[Sequence[int]],
+    xyz_heavy_sig: Sequence[tuple[int, int]],
+) -> Chem.Mol | None:
+    mol_heavy_atoms = tuple(atom for atom in mol_with_hs.GetAtoms() if atom.GetAtomicNum() > 1)
+    mol_heavy_sig = tuple(
+        (
+            atom.GetAtomicNum(),
+            sum(1 for neighbor in atom.GetNeighbors() if neighbor.GetAtomicNum() == 1),
+        )
+        for atom in mol_heavy_atoms
+    )
+    if mol_heavy_sig != xyz_heavy_sig:
+        return None
+
+    mol_to_xyz = [0] * mol_with_hs.GetNumAtoms()
+    for slot, heavy_atom in enumerate(mol_heavy_atoms):
+        mol_to_xyz[xyz_heavy_indices[slot]] = heavy_atom.GetIdx()
+        mol_hs = tuple(
+            neighbor.GetIdx()
+            for neighbor in heavy_atom.GetNeighbors()
+            if neighbor.GetAtomicNum() == 1
+        )
+        for xyz_h_idx, mol_h_idx in zip(xyz_hs_per_heavy[slot], mol_hs, strict=True):
+            mol_to_xyz[xyz_h_idx] = mol_h_idx
+    return Chem.RenumberAtoms(mol_with_hs, mol_to_xyz)
+
+
+def _try_align_by_substructure(
+    molecule: schema.Molecule,
+    candidate_mols: Sequence[Chem.Mol],
+) -> Chem.Mol | None:
+    rw_mol = Chem.RWMol()
+    conformer = Chem.Conformer(molecule.num_atoms)
+    for atom_idx, atomic_num in enumerate(molecule.atomic_numbers):
+        rw_mol.AddAtom(Chem.Atom(int(atomic_num)))
+        pos = molecule.positions[atom_idx]
+        conformer.SetAtomPosition(atom_idx, (float(pos[0]), float(pos[1]), float(pos[2])))
+    xyz_mol = rw_mol.GetMol()
+    xyz_mol.AddConformer(conformer, assignId=True)
+    rdDetermineBonds.DetermineConnectivity(xyz_mol)
+
+    query_params = Chem.AdjustQueryParameters.NoAdjustments()
+    query_params.makeBondsGeneric = True
+    query = Chem.AdjustQueryProperties(xyz_mol, query_params)
+
+    for mol_with_hs in candidate_mols:
+        match = mol_with_hs.GetSubstructMatch(query)
+        if len(match) == molecule.num_atoms:
+            return Chem.RenumberAtoms(mol_with_hs, list(match))
+    return None
+
+
 def _parse_aligned_mol(molecule: schema.Molecule) -> Chem.Mol:
     xyz_atomic_numbers = tuple(int(atomic_num) for atomic_num in molecule.atomic_numbers)
-    xyz_heavy = tuple(atomic_num for atomic_num in xyz_atomic_numbers if atomic_num > 1)
-
-    selected_mol: Chem.Mol | None = None
-    for candidate_smiles in (molecule.smiles_relaxed, molecule.smiles):
-        parsed = _mol_from_smiles(candidate_smiles)
-        if parsed is None:
-            continue
-        parsed_heavy = tuple(
-            atom.GetAtomicNum() for atom in parsed.GetAtoms() if atom.GetAtomicNum() > 1
-        )
-        with_hs = Chem.AddHs(parsed)
-        if parsed_heavy == xyz_heavy and with_hs.GetNumAtoms() == molecule.num_atoms:
-            selected_mol = with_hs
-            break
-
-    if selected_mol is None:
-        raise ValueError(
-            f"Could not align SMILES {molecule.smiles!r} or {molecule.smiles_relaxed!r} "
-            f"to atomic_numbers for molecule index={molecule.index}."
-        )
-
-    if not xyz_heavy:
-        return selected_mol
-
-    # Align heavy atoms in order and match each hydrogen to its bonded heavy atom in 3D.
-    mol_heavy_indices = tuple(
-        atom.GetIdx() for atom in selected_mol.GetAtoms() if atom.GetAtomicNum() > 1
-    )
     xyz_heavy_indices = tuple(
         xyz_idx for xyz_idx, atomic_num in enumerate(xyz_atomic_numbers) if atomic_num > 1
     )
+    candidate_mols = tuple(
+        Chem.AddHs(parsed)
+        for candidate_smiles in (molecule.smiles_relaxed, molecule.smiles)
+        if (parsed := _mol_from_smiles(candidate_smiles)) is not None
+        and Chem.AddHs(parsed).GetNumAtoms() == molecule.num_atoms
+    )
+    if not candidate_mols:
+        raise ValueError(f"Could not parse SMILES for molecule index={molecule.index}.")
+    if not xyz_heavy_indices:
+        return candidate_mols[0]
+
     heavy_positions = molecule.positions[np.asarray(xyz_heavy_indices)]
-
-    mol_hs_by_heavy: dict[int, list[int]] = {mol_idx: [] for mol_idx in mol_heavy_indices}
-    for atom in selected_mol.GetAtoms():
-        if atom.GetAtomicNum() == 1:
-            parent_mol_idx = atom.GetNeighbors()[0].GetIdx()
-            mol_hs_by_heavy[parent_mol_idx].append(atom.GetIdx())
-
-    xyz_to_mol: list[int] = []
-    heavy_cursor = 0
+    xyz_hs_per_heavy: tuple[list[int], ...] = tuple([] for _ in xyz_heavy_indices)
     for xyz_idx, atomic_num in enumerate(xyz_atomic_numbers):
-        if atomic_num > 1:
-            xyz_to_mol.append(mol_heavy_indices[heavy_cursor])
-            heavy_cursor += 1
-        else:
+        if atomic_num == 1:
             distances = np.linalg.norm(heavy_positions - molecule.positions[xyz_idx], axis=-1)
-            nearest_heavy_slot = int(np.argmin(distances))
-            parent_mol_idx = mol_heavy_indices[nearest_heavy_slot]
-            xyz_to_mol.append(mol_hs_by_heavy[parent_mol_idx].pop(0))
+            xyz_hs_per_heavy[int(np.argmin(distances))].append(xyz_idx)
 
-    return Chem.RenumberAtoms(selected_mol, xyz_to_mol)
+    xyz_heavy_sig = tuple(
+        (xyz_atomic_numbers[heavy_idx], len(xyz_hs_per_heavy[slot]))
+        for slot, heavy_idx in enumerate(xyz_heavy_indices)
+    )
+    for mol_with_hs in candidate_mols:
+        aligned = _try_align_by_heavy_order(
+            mol_with_hs, xyz_heavy_indices, xyz_hs_per_heavy, xyz_heavy_sig
+        )
+        if aligned is not None:
+            return aligned
+
+    substruct_aligned = _try_align_by_substructure(molecule, candidate_mols)
+    if substruct_aligned is not None:
+        return substruct_aligned
+
+    raise ValueError(
+        f"Could not align SMILES {molecule.smiles!r} or {molecule.smiles_relaxed!r} "
+        f"to atomic_numbers for molecule index={molecule.index}."
+    )
 
 
 def featurize_molecule(molecule: schema.Molecule) -> GraphFeatures:
