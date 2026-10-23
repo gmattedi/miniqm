@@ -1,6 +1,11 @@
 repos:
   - repo: local
     hooks:
+      - id: nbstripout
+        name: nbstripout
+        entry: uv run nbstripout --extra-keys="metadata.kernelspec metadata.language_info"
+        language: system
+        types: [jupyter]
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check --fix

@@ -24,6 +24,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "nbstripout>=0.9.1",
     "pre-commit>=4.0.0",
     "pytest>=8.0.0",
     "ruff>=0.17.1",
