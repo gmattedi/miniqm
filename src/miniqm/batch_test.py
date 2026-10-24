@@ -8,6 +8,7 @@ from miniqm import batch, schema
 
 
 def _make_labels() -> schema.QM9Labels:
+    """Builds synthetic QM9 scalar labels for batch tests."""
     return schema.QM9Labels(
         rotational_a=157.7,
         rotational_b=157.7,
@@ -32,6 +33,7 @@ def _make_labels() -> schema.QM9Labels:
 
 
 def _make_hf_molecule(*, offset: float = 2.0) -> schema.Molecule:
+    """Builds a 2-atom hydrogen fluoride Molecule translated along the x-axis."""
     return schema.Molecule(
         index=1,
         tag="gdb",
@@ -48,6 +50,7 @@ def _make_hf_molecule(*, offset: float = 2.0) -> schema.Molecule:
 
 
 def _make_expected_hf_features() -> batch.GraphFeatures:
+    """Builds the expected 2D atom and bond features for hydrogen fluoride."""
     # F (Z=9, deg=1, charge=0, SP3, not aromatic, not ring, achiral)
     fluorine_vec = (
         0.0,
@@ -115,13 +118,13 @@ def _make_expected_hf_features() -> batch.GraphFeatures:
     )
 
 
-def test_featurize_smiles_matches_expected_hf_graph():
+def test_featurize_smiles_matches_expected_hf_graph() -> None:
     features = batch.featurize_smiles("F")
 
     assert features == _make_expected_hf_features()
 
 
-def test_featurize_smiles_distinguishes_enantiomers():
+def test_featurize_smiles_distinguishes_enantiomers() -> None:
     r_features = batch.featurize_smiles("C[C@H](O)F")
     s_features = batch.featurize_smiles("C[C@@H](O)F")
 
@@ -137,7 +140,7 @@ def test_featurize_smiles_distinguishes_enantiomers():
     )
 
 
-def test_featurize_molecule_aligns_inline_bracket_hydrogens():
+def test_featurize_molecule_aligns_inline_bracket_hydrogens() -> None:
     # Methylammonium [CH3][NH3+] where the N-attached hydrogens appear immediately after N
     # at indices 2, 3, 4 before the C-attached hydrogens at indices 5, 6, 7.
     zwitterion = schema.Molecule(
@@ -175,7 +178,7 @@ def test_featurize_molecule_aligns_inline_bracket_hydrogens():
         assert features.bond_features[1, c_h_idx, 0] == 1.0
 
 
-def test_featurize_molecule_aligns_reordered_smiles_branches():
+def test_featurize_molecule_aligns_reordered_smiles_branches() -> None:
     # Propene where XYZ orders carbons as C_methyl (0), C_central (1), C_vinyl (2),
     # while smiles_relaxed writes the vinyl (=C) branch before the methyl (C) branch.
     propene = schema.Molecule(
@@ -209,11 +212,11 @@ def test_featurize_molecule_aligns_reordered_smiles_branches():
     assert features.bond_features[1, 2, 2] == 1.0
 
 
-def test_collate_batch_pads_and_centers_positions():
+def test_collate_batch_pads_and_centers_positions() -> None:
     mol = _make_hf_molecule(offset=2.0)
     expected_hf = _make_expected_hf_features()
 
-    collated = batch.collate_batch((mol,), max_atoms=4)
+    collated_batch = batch.collate_batch((mol,), max_atoms=4)
 
     expected_atom_features = np.zeros((1, 4, 22), dtype=np.float32)
     expected_atom_features[0, :2] = expected_hf.atom_features
@@ -233,16 +236,16 @@ def test_collate_batch_pads_and_centers_positions():
         positions=expected_positions,
         labels=expected_labels,
     )
-    assert collated == expected_batch
-    assert len(jax.tree.leaves(collated)) == 5
+    assert collated_batch == expected_batch
+    assert len(jax.tree.leaves(collated_batch)) == 5
 
 
-def test_featurize_smiles_rejects_invalid_smiles():
+def test_featurize_smiles_rejects_invalid_smiles() -> None:
     with pytest.raises(ValueError, match="Failed to parse SMILES"):
         batch.featurize_smiles("not_a_smiles")
 
 
-def test_collate_batch_validates_preconditions():
+def test_collate_batch_validates_preconditions() -> None:
     with pytest.raises(ValueError, match="Expected non-empty sequence"):
         batch.collate_batch(())
 

@@ -9,6 +9,7 @@ from miniqm import batch, data_source, schema
 
 
 def _make_sample_row(*, index: int, mu: float) -> dict[str, object]:
+    """Builds a padded 29-slot QM9 row dictionary for a 2-atom HF molecule."""
     charges = (9, 1, *(0,) * 27)
     positions = (
         (0.0, 0.0, 0.0),
@@ -48,6 +49,7 @@ def _make_sample_row(*, index: int, mu: float) -> dict[str, object]:
 
 
 def _write_sample_parquet(tmp_path: pathlib.Path, num_rows: int = 3) -> pathlib.Path:
+    """Writes a synthetic QM9 Parquet file with num_rows HF molecules."""
     parquet_path = tmp_path / "split.parquet"
     rows = tuple(
         _make_sample_row(index=row_idx + 1, mu=float(row_idx)) for row_idx in range(num_rows)
@@ -56,7 +58,7 @@ def _write_sample_parquet(tmp_path: pathlib.Path, num_rows: int = 3) -> pathlib.
     return parquet_path
 
 
-def test_data_source_loads_and_iterates_batches(tmp_path: pathlib.Path):
+def test_data_source_loads_and_iterates_batches(tmp_path: pathlib.Path) -> None:
     parquet_path = _write_sample_parquet(tmp_path, num_rows=3)
     molecules = schema.load_molecules(parquet_path)
 
@@ -70,7 +72,7 @@ def test_data_source_loads_and_iterates_batches(tmp_path: pathlib.Path):
     )
 
 
-def test_data_source_drop_last_and_max_molecules(tmp_path: pathlib.Path):
+def test_data_source_drop_last_and_max_molecules(tmp_path: pathlib.Path) -> None:
     parquet_path = _write_sample_parquet(tmp_path, num_rows=3)
 
     capped_source = data_source.DataSource(parquet_path, max_atoms=4, max_molecules=2)
@@ -88,7 +90,7 @@ def test_data_source_drop_last_and_max_molecules(tmp_path: pathlib.Path):
     assert dropped_batches[0].positions.shape == (2, 4, 3)
 
 
-def test_data_source_rejects_invalid_arguments(tmp_path: pathlib.Path):
+def test_data_source_rejects_invalid_arguments(tmp_path: pathlib.Path) -> None:
     parquet_path = _write_sample_parquet(tmp_path, num_rows=2)
 
     with pytest.raises(ValueError, match="Expected positive max_molecules"):

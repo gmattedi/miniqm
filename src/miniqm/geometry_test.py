@@ -11,6 +11,7 @@ from miniqm import jaxtypes as jt
 def _tetrahedral_signed_volume(
     positions: jt.Float[jax.Array, "*batch num_atoms 3"],
 ) -> jt.Float[jax.Array, "*batch"]:
+    """Computes the signed scalar triple product of the first four atoms."""
     edge_a = positions[..., 1, :] - positions[..., 0, :]
     edge_b = positions[..., 2, :] - positions[..., 0, :]
     edge_c = positions[..., 3, :] - positions[..., 0, :]
@@ -18,7 +19,7 @@ def _tetrahedral_signed_volume(
 
 
 @pytest.mark.parametrize(
-    ("positions", "atom_mask", "expected"),
+    ("positions", "atom_mask", "expected_positions"),
     (
         (
             jnp.array(
@@ -54,13 +55,13 @@ def _tetrahedral_signed_volume(
 def test_zero_center_of_mass(
     positions: jt.Float[jax.Array, "num_atoms 3"],
     atom_mask: jt.Bool[jax.Array, "*batch num_atoms"],
-    expected: jt.Float[jax.Array, "num_atoms 3"],
-):
-    centered = geometry.zero_center_of_mass(positions, atom_mask)
-    np.testing.assert_allclose(centered, expected, atol=1e-6)
+    expected_positions: jt.Float[jax.Array, "num_atoms 3"],
+) -> None:
+    centered_positions = geometry.zero_center_of_mass(positions, atom_mask)
+    np.testing.assert_allclose(centered_positions, expected_positions, atol=1e-6)
 
 
-def test_random_rotation_preserves_distances_and_chirality():
+def test_random_rotation_preserves_distances_and_chirality() -> None:
     chiral_coords = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -77,30 +78,30 @@ def test_random_rotation_preserves_distances_and_chirality():
             [True, True, True, True, False],
         ]
     )
-    centered = geometry.zero_center_of_mass(
+    centered_positions = geometry.zero_center_of_mass(
         jnp.stack((chiral_coords, chiral_coords), axis=0),
         atom_mask,
     )
 
-    rotated = geometry.random_rotation(jax.random.key(7), centered, atom_mask)
+    rotated_positions = geometry.random_rotation(jax.random.key(7), centered_positions, atom_mask)
 
-    orig_diffs = centered[:, :4, None, :] - centered[:, None, :4, :]
-    rot_diffs = rotated[:, :4, None, :] - rotated[:, None, :4, :]
+    orig_diffs = centered_positions[:, :4, None, :] - centered_positions[:, None, :4, :]
+    rot_diffs = rotated_positions[:, :4, None, :] - rotated_positions[:, None, :4, :]
     np.testing.assert_allclose(
         jnp.linalg.norm(rot_diffs, axis=-1),
         jnp.linalg.norm(orig_diffs, axis=-1),
         atol=1e-5,
     )
     np.testing.assert_allclose(
-        _tetrahedral_signed_volume(rotated),
-        _tetrahedral_signed_volume(centered),
+        _tetrahedral_signed_volume(rotated_positions),
+        _tetrahedral_signed_volume(centered_positions),
         atol=1e-5,
     )
-    np.testing.assert_array_equal(rotated[:, 4, :], jnp.zeros((2, 3), dtype=jnp.float32))
-    assert not jnp.allclose(rotated[0], rotated[1])
+    np.testing.assert_array_equal(rotated_positions[:, 4, :], jnp.zeros((2, 3), dtype=jnp.float32))
+    assert not jnp.allclose(rotated_positions[0], rotated_positions[1])
 
 
-def test_kabsch_align_recovers_rotated_and_translated_coordinates():
+def test_kabsch_align_recovers_rotated_and_translated_coordinates() -> None:
     raw_coords = jnp.array(
         [
             [
@@ -135,15 +136,19 @@ def test_kabsch_align_recovers_rotated_and_translated_coordinates():
         ],
         dtype=jnp.float32,
     )
-    rotated = geometry.random_rotation(jax.random.key(42), reference, atom_mask)
-    target = (rotated + translation) * atom_mask[..., None] + pad_garbage
+    rotated_positions = geometry.random_rotation(jax.random.key(42), reference, atom_mask)
+    target = (rotated_positions + translation) * atom_mask[..., None] + pad_garbage
 
-    aligned = geometry.kabsch_align(reference=reference, target=target, atom_mask=atom_mask)
+    aligned_positions = geometry.kabsch_align(
+        reference=reference,
+        target=target,
+        atom_mask=atom_mask,
+    )
 
-    np.testing.assert_allclose(aligned, reference, atol=1e-5)
+    np.testing.assert_allclose(aligned_positions, reference, atol=1e-5)
 
 
-def test_kabsch_align_preserves_chirality_against_mirror_reflection():
+def test_kabsch_align_preserves_chirality_against_mirror_reflection() -> None:
     chiral_coords = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -157,21 +162,21 @@ def test_kabsch_align_preserves_chirality_against_mirror_reflection():
     reference = geometry.zero_center_of_mass(chiral_coords, atom_mask)
     mirror_enantiomer = reference * jnp.array([1.0, 1.0, -1.0], dtype=jnp.float32)
 
-    aligned = geometry.kabsch_align(
+    aligned_positions = geometry.kabsch_align(
         reference=reference,
         target=mirror_enantiomer,
         atom_mask=atom_mask,
     )
 
     np.testing.assert_allclose(
-        _tetrahedral_signed_volume(aligned),
+        _tetrahedral_signed_volume(aligned_positions),
         _tetrahedral_signed_volume(mirror_enantiomer),
         atol=1e-5,
     )
-    assert float(jnp.sum((aligned - reference) ** 2)) > 1.0
+    assert float(jnp.sum((aligned_positions - reference) ** 2)) > 1.0
 
 
-def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
+def test_kabsch_align_gradients_flow_and_match_both_alignment_directions() -> None:
     ground_truth = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -184,7 +189,7 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
     )
     atom_mask = jnp.array([True, True, True, True, False])
     ground_truth = geometry.zero_center_of_mass(ground_truth, atom_mask)
-    perturbed = geometry.random_rotation(
+    perturbed_positions = geometry.random_rotation(
         jax.random.key(11),
         ground_truth + jnp.array([0.1, -0.05, 0.08], dtype=jnp.float32),
         atom_mask,
@@ -194,6 +199,7 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
     def loss_align_pred_to_gt(
         pred: jt.Float[jax.Array, "num_atoms 3"],
     ) -> jt.Float[jax.Array, ""]:
+        """Computes squared error when aligning predicted coordinates onto ground truth."""
         aligned_pred = geometry.kabsch_align(
             reference=ground_truth,
             target=pred,
@@ -205,6 +211,7 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
     def loss_align_gt_to_pred(
         pred: jt.Float[jax.Array, "num_atoms 3"],
     ) -> jt.Float[jax.Array, ""]:
+        """Computes squared error when aligning ground truth onto predicted coordinates."""
         aligned_gt = geometry.kabsch_align(
             reference=pred,
             target=ground_truth,
@@ -212,8 +219,8 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
         )
         return jnp.sum(((pred - aligned_gt) * atom_mask[..., None]) ** 2)
 
-    grad_pred_to_gt = jax.grad(loss_align_pred_to_gt)(perturbed)
-    grad_gt_to_pred = jax.grad(loss_align_gt_to_pred)(perturbed)
+    grad_pred_to_gt = jax.grad(loss_align_pred_to_gt)(perturbed_positions)
+    grad_gt_to_pred = jax.grad(loss_align_gt_to_pred)(perturbed_positions)
 
     assert jnp.all(jnp.isfinite(grad_pred_to_gt))
     assert float(jnp.linalg.norm(grad_pred_to_gt[:4])) > 0.0

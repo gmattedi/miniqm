@@ -11,6 +11,7 @@ from miniqm import schema
 
 
 def _make_sample_row() -> dict[str, object]:
+    """Builds a padded 29-slot QM9 row dictionary for a 5-atom methane molecule."""
     charges = (6, 1, 1, 1, 1, *(0,) * 24)
     positions = (
         (0.0, 0.0, 0.0),
@@ -53,6 +54,7 @@ def _make_sample_row() -> dict[str, object]:
 
 
 def _make_expected_molecule() -> schema.Molecule:
+    """Builds the expected unpadded 5-atom methane Molecule record."""
     return schema.Molecule(
         index=1,
         tag="gdb",
@@ -94,14 +96,14 @@ def _make_expected_molecule() -> schema.Molecule:
     )
 
 
-def test_molecule_from_row_slices_padding():
+def test_molecule_from_row_slices_padding() -> None:
     molecule = schema.Molecule.from_row(_make_sample_row())
 
     assert molecule == _make_expected_molecule()
     assert molecule.num_atoms == 5
 
 
-def test_load_molecules_roundtrip(tmp_path: pathlib.Path):
+def test_load_molecules_roundtrip(tmp_path: pathlib.Path) -> None:
     parquet_path = tmp_path / "sample.parquet"
     table = pa.Table.from_pylist((_make_sample_row(),))
     pq.write_table(table, parquet_path)
@@ -140,7 +142,7 @@ def test_molecule_validates_shapes(
     positions: jt.Float[np.ndarray, "..."],
     mulliken_charges: jt.Float[np.ndarray, "..."],
     expected_error: type[Exception],
-):
+) -> None:
     base_molecule = _make_expected_molecule()
 
     with pytest.raises(expected_error, match=r"atomic_numbers|positions|mulliken_charges"):
@@ -164,7 +166,7 @@ def test_molecule_from_row_rejects_invalid_scalar_types(
     field_name: str,
     bad_value: object,
     error_match: str,
-):
+) -> None:
     row = {**_make_sample_row(), field_name: bad_value}
 
     with pytest.raises(TypeError, match=error_match):

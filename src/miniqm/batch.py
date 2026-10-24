@@ -85,9 +85,9 @@ def _one_hot(value: object, choices: Sequence[object]) -> tuple[float, ...]:
 
 def _one_hot_with_other(value: object, choices: Sequence[object]) -> tuple[float, ...]:
     """Encodes a value as a one-hot tuple with a trailing catch-all channel."""
-    matched = tuple(1.0 if value == choice else 0.0 for choice in choices)
-    other = 0.0 if any(matched) else 1.0
-    return (*matched, other)
+    matched_flags = tuple(1.0 if value == choice else 0.0 for choice in choices)
+    other = 0.0 if any(matched_flags) else 1.0
+    return (*matched_flags, other)
 
 
 def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
@@ -246,15 +246,15 @@ def _parse_aligned_mol(molecule: schema.Molecule) -> Chem.Mol:
         for slot, heavy_idx in enumerate(xyz_heavy_indices)
     )
     for mol_with_hs in candidate_mols:
-        aligned = _try_align_by_heavy_order(
+        aligned_mol = _try_align_by_heavy_order(
             mol_with_hs, xyz_heavy_indices, xyz_hs_per_heavy, xyz_heavy_sig
         )
-        if aligned is not None:
-            return aligned
+        if aligned_mol is not None:
+            return aligned_mol
 
-    substruct_aligned = _try_align_by_substructure(molecule, candidate_mols)
-    if substruct_aligned is not None:
-        return substruct_aligned
+    substruct_aligned_mol = _try_align_by_substructure(molecule, candidate_mols)
+    if substruct_aligned_mol is not None:
+        return substruct_aligned_mol
 
     raise ValueError(
         f"Could not align SMILES {molecule.smiles!r} or {molecule.smiles_relaxed!r} "

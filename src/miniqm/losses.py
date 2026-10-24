@@ -23,9 +23,6 @@ class LossConfig:
     distance_cutoff: float = 5.0
 
 
-DEFAULT_LOSS_CONFIG: Final = LossConfig()
-
-
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class AlignedMseStats:
@@ -44,6 +41,9 @@ class LossOutput:
     aligned_mse_loss: jt.Float[jt.Array, ""]
     distance_loss: jt.Float[jt.Array, ""]
     rmsd: jt.Float[jt.Array, ""]
+
+
+DEFAULT_LOSS_CONFIG: Final = LossConfig()
 
 
 @jt.typed
@@ -159,9 +159,9 @@ def compute_diffusion_loss(
         atom_mask=atom_mask,
         cutoff=config.distance_cutoff,
     )
-    total = mse_stats.weighted_mse + config.distance_loss_weight * dist_loss
+    total_loss = mse_stats.weighted_mse + config.distance_loss_weight * dist_loss
     return LossOutput(
-        total_loss=total,
+        total_loss=total_loss,
         aligned_mse_loss=mse_stats.weighted_mse,
         distance_loss=dist_loss,
         rmsd=mse_stats.rmsd,
