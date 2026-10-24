@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from miniqm import batch as batch_lib
 from miniqm import geometry, model
 from miniqm import jaxtypes as jt
 
@@ -22,9 +23,7 @@ class _ModelTestInputs:
 
     noisy_positions: jt.Float[jt.Array, "batch num_atoms 3"]
     sigma: jt.Float[jt.Array, " batch"]
-    atom_features: jt.Float[jt.Array, "batch num_atoms 22"]
-    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms 6"]
-    atom_mask: jt.Bool[jt.Array, "batch num_atoms"]
+    batch: batch_lib.JaxBatch
 
 
 @jt.typed
@@ -42,14 +41,15 @@ def _make_dummy_inputs() -> _ModelTestInputs:
         jax.random.normal(pos_key, (2, 5, 3), dtype=jnp.float32) * atom_mask[..., None]
     )
     sigma = jnp.array([0.5, 2.0], dtype=jnp.float32)
-    atom_features = jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32)
-    bond_features = jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32)
+    graph_batch = batch_lib.JaxBatch(
+        atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
+        bond_features=jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32),
+        atom_mask=atom_mask,
+    )
     return _ModelTestInputs(
         noisy_positions=noisy_positions,
         sigma=sigma,
-        atom_features=atom_features,
-        bond_features=bond_features,
-        atom_mask=atom_mask,
+        batch=graph_batch,
     )
 
 
@@ -60,9 +60,7 @@ def test_denoiser_outputs_zero_centered_and_masked_coordinates() -> None:
         jax.random.key(1),
         inputs.noisy_positions,
         inputs.sigma,
-        atom_features=inputs.atom_features,
-        bond_features=inputs.bond_features,
-        atom_mask=inputs.atom_mask,
+        batch=inputs.batch,
     )
 
     predicted_positions = cast(
@@ -71,16 +69,14 @@ def test_denoiser_outputs_zero_centered_and_masked_coordinates() -> None:
             params,
             inputs.noisy_positions,
             inputs.sigma,
-            atom_features=inputs.atom_features,
-            bond_features=inputs.bond_features,
-            atom_mask=inputs.atom_mask,
+            batch=inputs.batch,
         ),
     )
 
     assert predicted_positions.shape == inputs.noisy_positions.shape
     np.testing.assert_allclose(jnp.sum(predicted_positions, axis=1), 0.0, atol=1e-5)
     np.testing.assert_allclose(
-        predicted_positions * (~inputs.atom_mask)[..., None],
+        predicted_positions * (~inputs.batch.atom_mask)[..., None],
         0.0,
         atol=1e-7,
     )
@@ -93,14 +89,15 @@ def test_denoiser_is_invariant_to_padded_slot_perturbations() -> None:
         jax.random.key(2),
         inputs.noisy_positions,
         inputs.sigma,
-        atom_features=inputs.atom_features,
-        bond_features=inputs.bond_features,
-        atom_mask=inputs.atom_mask,
+        batch=inputs.batch,
     )
 
-    pad_mask = ~inputs.atom_mask
+    pad_mask = ~inputs.batch.atom_mask
     perturbed_positions = inputs.noisy_positions + 50.0 * pad_mask[..., None]
-    perturbed_atoms = inputs.atom_features + 10.0 * pad_mask[..., None]
+    perturbed_batch = dataclasses.replace(
+        inputs.batch,
+        atom_features=inputs.batch.atom_features + 10.0 * pad_mask[..., None],
+    )
 
     clean_out = cast(
         "jt.Array",
@@ -108,9 +105,7 @@ def test_denoiser_is_invariant_to_padded_slot_perturbations() -> None:
             params,
             inputs.noisy_positions,
             inputs.sigma,
-            atom_features=inputs.atom_features,
-            bond_features=inputs.bond_features,
-            atom_mask=inputs.atom_mask,
+            batch=inputs.batch,
         ),
     )
     perturbed_out = cast(
@@ -119,9 +114,7 @@ def test_denoiser_is_invariant_to_padded_slot_perturbations() -> None:
             params,
             perturbed_positions,
             inputs.sigma,
-            atom_features=perturbed_atoms,
-            bond_features=inputs.bond_features,
-            atom_mask=inputs.atom_mask,
+            batch=perturbed_batch,
         ),
     )
 
@@ -136,9 +129,7 @@ def test_denoiser_recovers_centered_input_at_vanishing_noise() -> None:
         jax.random.key(3),
         inputs.noisy_positions,
         tiny_sigma,
-        atom_features=inputs.atom_features,
-        bond_features=inputs.bond_features,
-        atom_mask=inputs.atom_mask,
+        batch=inputs.batch,
     )
 
     predicted_positions = cast(
@@ -147,12 +138,13 @@ def test_denoiser_recovers_centered_input_at_vanishing_noise() -> None:
             params,
             inputs.noisy_positions,
             tiny_sigma,
-            atom_features=inputs.atom_features,
-            bond_features=inputs.bond_features,
-            atom_mask=inputs.atom_mask,
+            batch=inputs.batch,
         ),
     )
-    expected_positions = geometry.zero_center_of_mass(inputs.noisy_positions, inputs.atom_mask)
+    expected_positions = geometry.zero_center_of_mass(
+        inputs.noisy_positions,
+        inputs.batch.atom_mask,
+    )
 
     np.testing.assert_allclose(predicted_positions, expected_positions, rtol=1e-5, atol=1e-5)
 
@@ -164,9 +156,7 @@ def test_denoiser_gradients_are_finite_and_non_zero() -> None:
         jax.random.key(4),
         inputs.noisy_positions,
         inputs.sigma,
-        atom_features=inputs.atom_features,
-        bond_features=inputs.bond_features,
-        atom_mask=inputs.atom_mask,
+        batch=inputs.batch,
     )
 
     def loss_fn(model_params: flax_typing.VariableDict) -> jt.Array:
@@ -177,9 +167,7 @@ def test_denoiser_gradients_are_finite_and_non_zero() -> None:
                 model_params,
                 inputs.noisy_positions,
                 inputs.sigma,
-                atom_features=inputs.atom_features,
-                bond_features=inputs.bond_features,
-                atom_mask=inputs.atom_mask,
+                batch=inputs.batch,
             ),
         )
         return jnp.mean(jnp.square(predicted_positions))

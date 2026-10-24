@@ -5,6 +5,7 @@ import dataclasses
 from typing import Final, override
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdDetermineBonds
@@ -53,15 +54,35 @@ class GraphFeatures:
 
 @jax.tree_util.register_dataclass
 @jt.typed
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class JaxBatch:
+    """Padded JAX batch of molecular graphs, zero-centered 3D coordinates, and QM9 labels."""
+
+    atom_features: jt.Float[jt.Array, "batch max_atoms num_atom_features"]
+    bond_features: jt.Float[jt.Array, "batch max_atoms max_atoms num_bond_features"]
+    atom_mask: jt.Bool[jt.Array, "batch max_atoms"]
+    positions: jt.Float[jt.Array, "*pos_dims"] = dataclasses.field(
+        default_factory=lambda: jnp.empty((0, 0, _SPATIAL_DIMS), dtype=jnp.float32)
+    )
+    labels: jt.Float[jt.Array, "*label_dims"] = dataclasses.field(
+        default_factory=lambda: jnp.empty((0, 0), dtype=jnp.float32)
+    )
+
+
+@jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class Batch:
-    """Padded batch of molecular graphs, zero-COM 3D coordinates, and QM9 labels."""
+    """Padded NumPy batch of molecular graphs, zero-centered 3D coordinates, and QM9 labels."""
 
     atom_features: jt.Float[np.ndarray, "batch max_atoms num_atom_features"]
     bond_features: jt.Float[np.ndarray, "batch max_atoms max_atoms num_bond_features"]
     atom_mask: jt.Bool[np.ndarray, "batch max_atoms"]
-    positions: jt.Float[np.ndarray, "batch max_atoms 3"]
-    labels: jt.Float[np.ndarray, "batch num_labels"]
+    positions: jt.Float[np.ndarray, "*pos_dims"] = dataclasses.field(
+        default_factory=lambda: np.empty((0, 0, _SPATIAL_DIMS), dtype=np.float32)
+    )
+    labels: jt.Float[np.ndarray, "*label_dims"] = dataclasses.field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float32)
+    )
 
     __hash__ = None
 
@@ -77,17 +98,29 @@ class Batch:
             and np.allclose(self.labels, other.labels)
         )
 
+    def to_jax(self) -> JaxBatch:
+        """Converts all NumPy batch arrays to JAX device arrays."""
+        return JaxBatch(
+            atom_features=jnp.asarray(self.atom_features),
+            bond_features=jnp.asarray(self.bond_features),
+            atom_mask=jnp.asarray(self.atom_mask),
+            positions=jnp.asarray(self.positions),
+            labels=jnp.asarray(self.labels),
+        )
 
-def _one_hot(value: object, choices: Sequence[object]) -> tuple[float, ...]:
-    """Encodes a value as a one-hot tuple over choices."""
-    return tuple(1.0 if value == choice else 0.0 for choice in choices)
 
-
-def _one_hot_with_other(value: object, choices: Sequence[object]) -> tuple[float, ...]:
-    """Encodes a value as a one-hot tuple with a trailing catch-all channel."""
+def _one_hot(
+    value: object,
+    choices: Sequence[object],
+    *,
+    include_unknown: bool = False,
+) -> tuple[float, ...]:
+    """Encodes a value as a one-hot tuple over choices, with an optional catch-all channel."""
     matched_flags = tuple(1.0 if value == choice else 0.0 for choice in choices)
-    other = 0.0 if any(matched_flags) else 1.0
-    return (*matched_flags, other)
+    if not include_unknown:
+        return matched_flags
+    unknown_flag = 0.0 if any(matched_flags) else 1.0
+    return (*matched_flags, unknown_flag)
 
 
 def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
@@ -99,9 +132,9 @@ def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
     )
     return (
         *_one_hot(atom.GetAtomicNum(), _ELEMENTS),
-        *_one_hot_with_other(atom.GetTotalDegree(), _DEGREES),
+        *_one_hot(atom.GetTotalDegree(), _DEGREES, include_unknown=True),
         *_one_hot(atom.GetFormalCharge(), _FORMAL_CHARGES),
-        *_one_hot_with_other(atom.GetHybridization(), _HYBRIDIZATIONS),
+        *_one_hot(atom.GetHybridization(), _HYBRIDIZATIONS, include_unknown=True),
         1.0 if atom.GetIsAromatic() else 0.0,
         1.0 if atom.IsInRing() else 0.0,
         *chirality_one_hot,

@@ -8,6 +8,7 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 
+from miniqm import batch as batch_lib
 from miniqm import geometry
 from miniqm import jaxtypes as jt
 from miniqm import noise as noise_lib
@@ -164,18 +165,14 @@ class Denoiser(nn.Module):
         noisy_positions: jt.Float[jt.Array, "batch num_atoms 3"],
         sigma: jt.Float[jt.Array, " batch"],
         *,
-        atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"],
-        bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
-        atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+        batch: batch_lib.JaxBatch,
     ) -> jt.Float[jt.Array, "batch num_atoms 3"]:
         """Predicts clean, zero-centered 3D atomic coordinates from noisy coordinates.
 
         Args:
             noisy_positions: Gaussian-corrupted atomic coordinates.
             sigma: Noise standard deviation per molecule.
-            atom_features: Per-atom 2D chemical features.
-            bond_features: Pairwise 2D bond features.
-            atom_mask: Boolean mask indicating valid atoms.
+            batch: Padded molecular graph features and valid-atom mask.
 
         Returns:
             Denoised zero-centered atomic coordinates with padded slots zeroed.
@@ -189,7 +186,7 @@ class Denoiser(nn.Module):
         )
 
         batch_size, num_atoms, _ = noisy_positions.shape
-        mask_3d = atom_mask[..., None]
+        mask_3d = batch.atom_mask[..., None]
 
         factors = noise_lib.preconditioning_factors(sigma, config=self.config.noise)
         scaled_positions = (factors.c_in[:, None, None] * noisy_positions) * mask_3d
@@ -204,12 +201,16 @@ class Denoiser(nn.Module):
             nn.silu(nn.Dense(transformer_config.hidden_dim)(fourier_sigma))
         )
 
-        atom_inputs = jnp.concatenate((atom_features, scaled_positions), axis=-1)
+        atom_inputs = jnp.concatenate((batch.atom_features, scaled_positions), axis=-1)
         act = (
             nn.Dense(transformer_config.hidden_dim)(atom_inputs) + noise_cond[:, None, :]
         ) * mask_3d
 
-        pair_inputs = _pairwise_geometry_features(scaled_positions, bond_features, atom_mask)
+        pair_inputs = _pairwise_geometry_features(
+            scaled_positions,
+            batch.bond_features,
+            batch.atom_mask,
+        )
         pair_hidden = nn.silu(
             nn.Dense(transformer_config.hidden_dim // 2)(nn.LayerNorm()(pair_inputs))
         )
@@ -229,7 +230,7 @@ class Denoiser(nn.Module):
                 act,
                 noise_cond=noise_cond,
                 pair_bias=pair_biases[:, layer_idx],
-                atom_mask=atom_mask,
+                atom_mask=batch.atom_mask,
             )
 
         raw_output = nn.Dense(_SPATIAL_DIMS)(nn.LayerNorm()(act))
@@ -237,4 +238,4 @@ class Denoiser(nn.Module):
             factors.c_skip[:, None, None] * noisy_positions
             + factors.c_out[:, None, None] * raw_output
         )
-        return geometry.zero_center_of_mass(denoised_positions, atom_mask)
+        return geometry.zero_center_of_mass(denoised_positions, batch.atom_mask)

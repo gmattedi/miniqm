@@ -8,6 +8,7 @@ from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 
+from miniqm import batch as batch_lib
 from miniqm import geometry, model
 from miniqm import jaxtypes as jt
 from miniqm import noise as noise_lib
@@ -51,9 +52,7 @@ def _euler_churn_step(
     params: flax_typing.VariableDict,
     sigma_current: jt.Float[jt.Array, ""],
     sigma_next: jt.Float[jt.Array, ""],
-    atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"],
-    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
-    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    batch: batch_lib.JaxBatch,
     config: SamplingConfig,
 ) -> jt.Float[jt.Array, "batch num_atoms 3"]:
     """Applies one stochastic-churn corrector and Euler predictor step."""
@@ -67,7 +66,7 @@ def _euler_churn_step(
     churn_noise = jax.random.normal(key, shape=positions.shape, dtype=positions.dtype)
     noisy_positions = geometry.zero_center_of_mass(
         positions + churn_std * churn_noise,
-        atom_mask,
+        batch.atom_mask,
     )
 
     sigma_per_molecule = jnp.full((batch_size,), sigma_hat, dtype=positions.dtype)
@@ -76,9 +75,7 @@ def _euler_churn_step(
             params,
             noisy_positions,
             sigma_per_molecule,
-            atom_features=atom_features,
-            bond_features=bond_features,
-            atom_mask=atom_mask,
+            batch=batch,
         )
     )
 
@@ -86,7 +83,7 @@ def _euler_churn_step(
     updated_positions = (
         noisy_positions + config.step_scale * (sigma_next - sigma_hat) * score_direction
     )
-    return geometry.zero_center_of_mass(updated_positions, atom_mask)
+    return geometry.zero_center_of_mass(updated_positions, batch.atom_mask)
 
 
 @jt.typed
@@ -95,9 +92,7 @@ def sample_coordinates(
     denoiser: model.Denoiser,
     params: flax_typing.VariableDict,
     *,
-    atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"],
-    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
-    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    batch: batch_lib.JaxBatch,
     config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
 ) -> jt.Float[jt.Array, "batch num_atoms 3"]:
     """Generates 3D molecular coordinates from Gaussian noise via Euler integration with churn.
@@ -106,9 +101,7 @@ def sample_coordinates(
         key: JAX PRNG key.
         denoiser: Configured Denoiser Linen module.
         params: Initialized model parameters.
-        atom_features: Per-atom 2D chemical features.
-        bond_features: Pairwise 2D bond features.
-        atom_mask: Boolean mask indicating valid atoms.
+        batch: Padded molecular graph features and valid-atom mask.
         config: Reverse integration and stochastic churn parameters.
 
     Returns:
@@ -120,16 +113,16 @@ def sample_coordinates(
         config.gamma_0,
         config.step_scale,
     )
-    batch_size, num_atoms, _ = atom_features.shape
+    batch_size, num_atoms, _ = batch.atom_features.shape
     schedule = noise_lib.rollout_schedule(config.num_steps, config=config.noise)
 
     initial_key, loop_key = jax.random.split(key)
     initial_noise = jax.random.normal(
         initial_key,
         shape=(batch_size, num_atoms, _SPATIAL_DIMS),
-        dtype=atom_features.dtype,
+        dtype=batch.atom_features.dtype,
     )
-    initial_positions = geometry.zero_center_of_mass(schedule[0] * initial_noise, atom_mask)
+    initial_positions = geometry.zero_center_of_mass(schedule[0] * initial_noise, batch.atom_mask)
     step_keys = jax.random.split(loop_key, config.num_steps)
 
     @jt.typed
@@ -146,9 +139,7 @@ def sample_coordinates(
             params=params,
             sigma_current=sigma_current,
             sigma_next=sigma_next,
-            atom_features=atom_features,
-            bond_features=bond_features,
-            atom_mask=atom_mask,
+            batch=batch,
             config=config,
         )
         return next_positions, None

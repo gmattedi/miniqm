@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from miniqm import batch as batch_lib
 from miniqm import geometry, model, noise, sampling
 from miniqm import jaxtypes as jt
 
@@ -22,23 +23,23 @@ class _SamplerTestSetup:
 
     denoiser: model.Denoiser
     params: flax_typing.VariableDict
-    atom_features: jt.Float[jt.Array, "batch num_atoms 22"]
-    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms 6"]
-    atom_mask: jt.Bool[jt.Array, "batch num_atoms"]
+    batch: batch_lib.JaxBatch
 
 
 @jt.typed
 def _make_test_setup() -> _SamplerTestSetup:
     """Creates a 2-molecule synthetic graph batch and initialized Denoiser parameters."""
     atom_key, bond_key, init_key = jax.random.split(jax.random.key(0), 3)
-    atom_features = jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32)
-    bond_features = jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32)
-    atom_mask = jnp.array(
-        [
-            [True, True, True, True, False],
-            [True, True, True, False, False],
-        ],
-        dtype=jnp.bool_,
+    graph_batch = batch_lib.JaxBatch(
+        atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
+        bond_features=jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32),
+        atom_mask=jnp.array(
+            [
+                [True, True, True, True, False],
+                [True, True, True, False, False],
+            ],
+            dtype=jnp.bool_,
+        ),
     )
     denoiser = model.Denoiser(config=_TEST_DENOISER_CONFIG)
     dummy_positions = jnp.zeros((2, 5, 3), dtype=jnp.float32)
@@ -47,16 +48,12 @@ def _make_test_setup() -> _SamplerTestSetup:
         init_key,
         dummy_positions,
         dummy_sigma,
-        atom_features=atom_features,
-        bond_features=bond_features,
-        atom_mask=atom_mask,
+        batch=graph_batch,
     )
     return _SamplerTestSetup(
         denoiser=denoiser,
         params=params,
-        atom_features=atom_features,
-        bond_features=bond_features,
-        atom_mask=atom_mask,
+        batch=graph_batch,
     )
 
 
@@ -68,9 +65,7 @@ def test_sample_coordinates_returns_zero_centered_masked_positions() -> None:
         jax.random.key(2),
         setup.denoiser,
         setup.params,
-        atom_features=setup.atom_features,
-        bond_features=setup.bond_features,
-        atom_mask=setup.atom_mask,
+        batch=setup.batch,
         config=sampling_config,
     )
 
@@ -78,7 +73,7 @@ def test_sample_coordinates_returns_zero_centered_masked_positions() -> None:
     assert bool(jnp.all(jnp.isfinite(sampled_positions)))
     np.testing.assert_allclose(jnp.sum(sampled_positions, axis=1), 0.0, atol=1e-5)
     np.testing.assert_allclose(
-        sampled_positions * (~setup.atom_mask)[..., None],
+        sampled_positions * (~setup.batch.atom_mask)[..., None],
         0.0,
         atol=1e-7,
     )
@@ -94,9 +89,7 @@ def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network(
         sample_key,
         setup.denoiser,
         zero_params,
-        atom_features=setup.atom_features,
-        bond_features=setup.bond_features,
-        atom_mask=setup.atom_mask,
+        batch=setup.batch,
         config=ode_config,
     )
 
@@ -110,7 +103,7 @@ def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network(
     initial_key, _ = jax.random.split(sample_key)
     initial_positions = geometry.zero_center_of_mass(
         schedule[0] * jax.random.normal(initial_key, (2, 5, 3), dtype=jnp.float32),
-        setup.atom_mask,
+        setup.batch.atom_mask,
     )
     expected_positions = initial_positions * total_contraction
 

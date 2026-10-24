@@ -237,7 +237,7 @@ def test_collate_batch_pads_and_centers_positions() -> None:
         labels=expected_labels,
     )
     assert collated_batch == expected_batch
-    assert len(jax.tree.leaves(collated_batch)) == 5
+    assert len(jax.tree.leaves(collated_batch.to_jax())) == 5
 
 
 def test_featurize_smiles_rejects_invalid_smiles() -> None:
