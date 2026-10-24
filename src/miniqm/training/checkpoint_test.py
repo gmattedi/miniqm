@@ -86,7 +86,8 @@ def test_load_run_checkpoint_restores_configs_and_weights(tmp_path: pathlib.Path
         dummy_batch,
         config=_TINY_TRAIN_CONFIG,
     )
-    run_dir = tmp_path / "run"
+    parent_dir = tmp_path / "experiment"
+    run_dir = parent_dir / "20261024_220000"
     run_config = train.RunConfig(run_dir=run_dir, train=_TINY_TRAIN_CONFIG)
     train.write_run_config(run_config)
     checkpoint.save_checkpoint(
@@ -94,8 +95,9 @@ def test_load_run_checkpoint_restores_configs_and_weights(tmp_path: pathlib.Path
         checkpoint.Checkpoint(step=7, params=state.params, ema_params=state.ema_params),
     )
 
-    loaded = checkpoint.load_run_checkpoint(run_dir)
+    loaded = checkpoint.load_run_checkpoint(parent_dir)
 
+    assert loaded.run_dir == run_dir
     assert loaded.model_config == _TINY_TRAIN_CONFIG.model
     assert loaded.checkpoint.step == 7
     for expected, actual in zip(

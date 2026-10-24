@@ -1,5 +1,6 @@
-"""Kabsch-aligned EDM coordinate MSE and local pairwise distance losses."""
+"""Kabsch-aligned EDM coordinate MSE, local pairwise distance loss, and lDDT scoring."""
 
+from collections.abc import Sequence
 import dataclasses
 from typing import Final
 
@@ -12,6 +13,7 @@ from miniqm.diffusion import noise as noise_lib
 
 # Prevents infinite gradient of sqrt(r^2) at zero interatomic distance or zero RMSD.
 _DIST_EPS: Final = 1e-8
+_LDDT_THRESHOLDS: Final = (0.1, 0.25, 0.5, 1.0)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -49,6 +51,7 @@ class LossOutput:
     aligned_mse_loss: jt.Float[jt.Array, ""]
     distance_loss: jt.Float[jt.Array, ""]
     rmsd: jt.Float[jt.Array, ""]
+    lddt: jt.Float[jt.Array, ""]
 
 
 DEFAULT_LOSS_CONFIG: Final = LossConfig()
@@ -139,6 +142,54 @@ def pairwise_distance_loss(
 
 
 @jt.typed
+def lddt_per_molecule(
+    *,
+    predicted_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+    target_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    cutoff: float = DEFAULT_LOSS_CONFIG.distance_cutoff,
+    thresholds: Sequence[float] = _LDDT_THRESHOLDS,
+) -> jt.Float[jt.Array, " batch"]:
+    """Computes per-molecule Local Distance Difference Test (lDDT) scores in [0, 1].
+
+    Args:
+        predicted_positions: Predicted 3D atomic coordinates.
+        target_positions: Ground-truth 3D atomic coordinates.
+        atom_mask: Boolean mask indicating valid atoms.
+        cutoff: Inclusion radius in Angstroms on ground-truth interatomic distances.
+        thresholds: Distance error tolerances in Angstroms averaged into the score.
+
+    Returns:
+        Per-molecule lDDT scores in [0, 1].
+    """
+    _, num_atoms, _ = predicted_positions.shape
+    pred_offsets = predicted_positions[:, :, None, :] - predicted_positions[:, None, :, :]
+    target_offsets = target_positions[:, :, None, :] - target_positions[:, None, :, :]
+
+    pred_dists = jnp.sqrt(jnp.sum(jnp.square(pred_offsets), axis=-1) + _DIST_EPS)
+    target_dists = jnp.sqrt(jnp.sum(jnp.square(target_offsets), axis=-1) + _DIST_EPS)
+
+    valid_pairs = atom_mask[:, :, None] & atom_mask[:, None, :]
+    not_self = ~jnp.eye(num_atoms, dtype=jnp.bool_)[None, :, :]
+    within_cutoff = target_dists < cutoff
+    pair_mask = (valid_pairs & not_self & within_cutoff).astype(predicted_positions.dtype)
+
+    dist_err = jnp.abs(pred_dists - target_dists)
+    thresh_array = jnp.asarray(tuple(thresholds), dtype=predicted_positions.dtype)
+    # (batch, num_atoms, num_atoms) fraction of satisfied distance thresholds per pair.
+    pair_scores = jnp.mean(
+        (dist_err[..., None] < thresh_array).astype(predicted_positions.dtype),
+        axis=-1,
+    )
+    num_pairs = jnp.sum(pair_mask, axis=(-1, -2))
+    return jnp.where(
+        num_pairs > 0.0,
+        jnp.sum(pair_scores * pair_mask, axis=(-1, -2)) / jnp.maximum(num_pairs, 1.0),
+        1.0,
+    )
+
+
+@jt.typed
 def compute_diffusion_loss(
     *,
     predicted_positions: jt.Float[jt.Array, "batch num_atoms 3"],
@@ -147,7 +198,7 @@ def compute_diffusion_loss(
     atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
     config: LossConfig = DEFAULT_LOSS_CONFIG,
 ) -> LossOutput:
-    """Computes the combined Kabsch-aligned EDM MSE and local pairwise distance loss.
+    """Computes the combined Kabsch-aligned EDM MSE, local pairwise distance loss, and lDDT.
 
     Args:
         predicted_positions: Denoised atomic coordinates predicted by the model.
@@ -157,7 +208,7 @@ def compute_diffusion_loss(
         config: Loss weighting and cutoff configuration.
 
     Returns:
-        Combined scalar loss alongside individual MSE, distance, and RMSD metrics.
+        Combined scalar loss alongside individual MSE, distance, RMSD, and lDDT metrics.
     """
     mse_stats = aligned_mse_loss(
         predicted_positions=predicted_positions,
@@ -172,10 +223,19 @@ def compute_diffusion_loss(
         atom_mask=atom_mask,
         cutoff=config.distance_cutoff,
     )
+    lddt = jnp.mean(
+        lddt_per_molecule(
+            predicted_positions=predicted_positions,
+            target_positions=target_positions,
+            atom_mask=atom_mask,
+            cutoff=config.distance_cutoff,
+        )
+    )
     total_loss = mse_stats.weighted_mse + config.distance_loss_weight * dist_loss
     return LossOutput(
         total_loss=total_loss,
         aligned_mse_loss=mse_stats.weighted_mse,
         distance_loss=dist_loss,
         rmsd=mse_stats.rmsd,
+        lddt=lddt,
     )

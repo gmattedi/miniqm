@@ -38,24 +38,39 @@ class ValidationMetrics:
     aligned_mse_loss: float
     distance_loss: float
     rmsd: float
+    lddt: float
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SamplingMetrics:
-    """Full reverse-diffusion conformer generation RMSD statistics on a validation batch."""
+    """Reverse-diffusion conformer generation RMSD and lDDT statistics on a validation batch."""
 
     sampled_rmsd_mean: float
     sampled_rmsd_median: float
+    sampled_lddt_mean: float
+    sampled_lddt_median: float
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class DatasetSamplingMetrics:
-    """Full reverse-diffusion conformer generation RMSD and threshold coverage across a split."""
+    """Full reverse-diffusion conformer generation RMSD, lDDT, and coverage across a split."""
 
     sampled_rmsd_mean: float
     sampled_rmsd_median: float
+    sampled_lddt_mean: float
+    sampled_lddt_median: float
     fraction_below_0_5a: float
     fraction_below_1_0a: float
+
+
+@jax.tree_util.register_dataclass
+@jt.typed
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SampledBatchStats:
+    """Per-molecule Kabsch RMSD and local lDDT for a batch of generated conformers."""
+
+    rmsd: jt.Float[jt.Array, " batch"]
+    lddt: jt.Float[jt.Array, " batch"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -246,6 +261,7 @@ def evaluate_loss(
     mses: list[float] = []
     dists: list[float] = []
     rmsds: list[float] = []
+    lddts: list[float] = []
 
     step_rng = rng
     for host_batch in val_source.iter_batches(
@@ -267,13 +283,61 @@ def evaluate_loss(
         mses.append(float(loss_out.aligned_mse_loss))
         dists.append(float(loss_out.distance_loss))
         rmsds.append(float(loss_out.rmsd))
+        lddts.append(float(loss_out.lddt))
 
     return ValidationMetrics(
         total_loss=float(np.mean(totals)),
         aligned_mse_loss=float(np.mean(mses)),
         distance_loss=float(np.mean(dists)),
         rmsd=float(np.mean(rmsds)),
+        lddt=float(np.mean(lddts)),
     )
+
+
+@jt.typed
+def compute_sampled_metrics_per_molecule(
+    params: flax_typing.VariableDict,
+    rng: jt.Array,
+    batch: batch_lib.JaxBatch,
+    *,
+    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
+    sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
+) -> SampledBatchStats:
+    """Samples 3D conformers for a batch and returns per-molecule Kabsch RMSD and lDDT.
+
+    Args:
+        params: Model parameters to evaluate (typically EMA weights).
+        rng: PRNG key for reverse-diffusion sampling.
+        batch: Padded JAX batch containing target coordinates.
+        model_config: Denoiser architecture configuration.
+        sampling_config: Reverse Euler integration configuration.
+
+    Returns:
+        Per-molecule Kabsch-aligned coordinate RMSD and local lDDT scores.
+    """
+    denoiser = model_lib.Denoiser(config=model_config)
+    generated = sampling_lib.sample_coordinates(
+        rng,
+        denoiser,
+        params,
+        batch=batch,
+        config=sampling_config,
+    )
+    aligned = geometry.kabsch_align(
+        reference=batch.positions,
+        target=generated,
+        atom_mask=batch.atom_mask,
+    )
+    # (batch,) valid atom counts per molecule, clamped to >= 1.
+    atom_counts = jnp.maximum(jnp.sum(batch.atom_mask, axis=-1), 1)
+    # (batch,) per-molecule Kabsch-aligned coordinate RMSD.
+    rmsd = jnp.sqrt(jnp.sum(jnp.square(aligned - batch.positions), axis=(-1, -2)) / atom_counts)
+    lddt = losses_lib.lddt_per_molecule(
+        predicted_positions=generated,
+        target_positions=batch.positions,
+        atom_mask=batch.atom_mask,
+    )
+    return SampledBatchStats(rmsd=rmsd, lddt=lddt)
 
 
 @jt.typed
@@ -297,23 +361,13 @@ def compute_sampled_rmsd_per_molecule(
     Returns:
         Per-molecule Kabsch-aligned coordinate RMSD in Angstroms.
     """
-    denoiser = model_lib.Denoiser(config=model_config)
-    generated = sampling_lib.sample_coordinates(
-        rng,
-        denoiser,
+    return compute_sampled_metrics_per_molecule(
         params,
-        batch=batch,
-        config=sampling_config,
-    )
-    aligned = geometry.kabsch_align(
-        reference=batch.positions,
-        target=generated,
-        atom_mask=batch.atom_mask,
-    )
-    # (batch,) valid atom counts per molecule, clamped to >= 1.
-    atom_counts = jnp.maximum(jnp.sum(batch.atom_mask, axis=-1), 1)
-    # (batch,) per-molecule Kabsch-aligned coordinate RMSD.
-    return jnp.sqrt(jnp.sum(jnp.square(aligned - batch.positions), axis=(-1, -2)) / atom_counts)
+        rng,
+        batch,
+        model_config=model_config,
+        sampling_config=sampling_config,
+    ).rmsd
 
 
 @jt.typed
@@ -325,7 +379,7 @@ def evaluate_sampling_rmsd(
     model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
     sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> SamplingMetrics:
-    """Generates 3D conformers from Gaussian noise and computes Kabsch-aligned RMSD.
+    """Generates 3D conformers from Gaussian noise and computes Kabsch RMSD and lDDT.
 
     Args:
         params: Model parameters to evaluate (typically EMA weights).
@@ -335,9 +389,9 @@ def evaluate_sampling_rmsd(
         sampling_config: Reverse Euler integration configuration.
 
     Returns:
-        Mean and median Kabsch-aligned RMSD across the sampled validation batch.
+        Mean and median Kabsch RMSD and lDDT across the sampled validation batch.
     """
-    rmsd_per_mol = compute_sampled_rmsd_per_molecule(
+    stats = compute_sampled_metrics_per_molecule(
         params,
         rng,
         val_batch,
@@ -345,8 +399,10 @@ def evaluate_sampling_rmsd(
         sampling_config=sampling_config,
     )
     return SamplingMetrics(
-        sampled_rmsd_mean=float(jnp.mean(rmsd_per_mol)),
-        sampled_rmsd_median=float(jnp.median(rmsd_per_mol)),
+        sampled_rmsd_mean=float(jnp.mean(stats.rmsd)),
+        sampled_rmsd_median=float(jnp.median(stats.rmsd)),
+        sampled_lddt_mean=float(jnp.mean(stats.lddt)),
+        sampled_lddt_median=float(jnp.median(stats.lddt)),
     )
 
 
@@ -360,7 +416,7 @@ def evaluate_dataset_sampling(
     model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
     sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> DatasetSamplingMetrics:
-    """Evaluates reverse-diffusion conformer generation RMSD across an entire data source.
+    """Evaluates reverse-diffusion conformer generation RMSD and lDDT across a data source.
 
     Args:
         params: Model parameters to evaluate (typically EMA weights).
@@ -371,10 +427,11 @@ def evaluate_dataset_sampling(
         sampling_config: Reverse Euler integration configuration.
 
     Returns:
-        Mean and median RMSD along with sub-0.5 A and sub-1.0 A coverage fractions.
+        Mean and median RMSD and lDDT along with sub-0.5 A and sub-1.0 A coverage fractions.
     """
     batches = tuple(eval_source.iter_batches(batch_size=batch_size, drop_last=False))
     rmsd_chunks: list[np.ndarray] = []
+    lddt_chunks: list[np.ndarray] = []
     step_rng = rng
 
     with progress.Progress(
@@ -387,20 +444,24 @@ def evaluate_dataset_sampling(
         task_id = progress_bar.add_task("Sampling conformers", total=len(batches))
         for host_batch in batches:
             step_rng, batch_rng = jax.random.split(step_rng)
-            batch_rmsd = compute_sampled_rmsd_per_molecule(
+            stats = compute_sampled_metrics_per_molecule(
                 params,
                 batch_rng,
                 host_batch.to_jax(),
                 model_config=model_config,
                 sampling_config=sampling_config,
             )
-            rmsd_chunks.append(np.asarray(batch_rmsd, dtype=np.float32))
+            rmsd_chunks.append(np.asarray(stats.rmsd, dtype=np.float32))
+            lddt_chunks.append(np.asarray(stats.lddt, dtype=np.float32))
             progress_bar.advance(task_id)
 
     all_rmsds = np.concatenate(rmsd_chunks, axis=0)
+    all_lddts = np.concatenate(lddt_chunks, axis=0)
     return DatasetSamplingMetrics(
         sampled_rmsd_mean=float(np.mean(all_rmsds)),
         sampled_rmsd_median=float(np.median(all_rmsds)),
+        sampled_lddt_mean=float(np.mean(all_lddts)),
+        sampled_lddt_median=float(np.median(all_lddts)),
         fraction_below_0_5a=float(np.mean(all_rmsds < _STRICT_RMSD_THRESHOLD_A)),
         fraction_below_1_0a=float(np.mean(all_rmsds < _LOOSE_RMSD_THRESHOLD_A)),
     )
@@ -455,21 +516,22 @@ def run_evaluation(config: EvalConfig) -> TestEvaluationReport:
         sampling_metrics=sampling_metrics,
     )
 
-    output_path = config.output_path or (config.run_dir / "test_metrics.json")
+    output_path = config.output_path or (loaded.run_dir / "test_metrics.json")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(dataclasses.asdict(report), indent=2) + "\n",
         encoding="utf-8",
     )
     _LOGGER.info(
-        "Evaluated %d molecules at step=%d: test_loss=%.4f test_rmsd=%.3f A "
-        "sampled_rmsd_mean=%.3f A sampled_rmsd_median=%.3f A (<0.5A=%.1f%%, <1.0A=%.1f%%)",
+        "Evaluated %d molecules at step=%d: test_loss=%.4f test_rmsd=%.3f A test_lddt=%.3f "
+        "sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f (<0.5A=%.1f%%, <1.0A=%.1f%%)",
         report.num_molecules,
         report.step,
         loss_metrics.total_loss,
         loss_metrics.rmsd,
+        loss_metrics.lddt,
         sampling_metrics.sampled_rmsd_mean,
-        sampling_metrics.sampled_rmsd_median,
+        sampling_metrics.sampled_lddt_mean,
         100.0 * sampling_metrics.fraction_below_0_5a,
         100.0 * sampling_metrics.fraction_below_1_0a,
     )

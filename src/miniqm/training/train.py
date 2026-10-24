@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator, Mapping
 import dataclasses
+import datetime as dt
 import functools
 import json
 import logging
@@ -516,6 +517,15 @@ def write_run_config(config: RunConfig) -> None:
     )
 
 
+def _init_timestamped_run_dir(config: RunConfig) -> pathlib.Path:
+    """Creates a timestamped run subdirectory and writes the serialized configuration."""
+    timestamp = dt.datetime.now(tz=dt.UTC).strftime("%Y%m%d_%H%M%S")
+    active_run_dir = config.run_dir / timestamp
+    write_run_config(dataclasses.replace(config, run_dir=active_run_dir))
+    _LOGGER.info("Saving run artifacts to %s", active_run_dir)
+    return active_run_dir
+
+
 def _make_progress() -> progress.Progress:
     """Constructs the Rich progress bar for the training step loop."""
     return progress.Progress(
@@ -573,9 +583,9 @@ def run_training(config: RunConfig) -> TrainState:
     Returns:
         Final training state after all configured optimization steps.
     """
-    write_run_config(config)
-    checkpoints_dir = config.run_dir / "checkpoints"
-    metrics_path = config.run_dir / "metrics.jsonl"
+    active_run_dir = _init_timestamped_run_dir(config)
+    checkpoints_dir = active_run_dir / "checkpoints"
+    metrics_path = active_run_dir / "metrics.jsonl"
 
     configure_cpu_devices(config.num_devices)
     train_source = data_source.DataSource(
@@ -621,11 +631,11 @@ def run_training(config: RunConfig) -> TrainState:
     )
     first_batch = next(batch_iter)
 
-    best_sampled_rmsd = float("inf")
+    best_sampled_lddt = -1.0
     start_time = time.monotonic()
 
     with (
-        tensorboardX.SummaryWriter(logdir=str(config.run_dir)) as writer,
+        tensorboardX.SummaryWriter(logdir=str(active_run_dir)) as writer,
         _make_progress() as progress_bar,
     ):
         task_id = progress_bar.add_task("Training", total=config.num_steps, metrics="")
@@ -646,6 +656,7 @@ def run_training(config: RunConfig) -> TrainState:
                         "aligned_mse_loss": float(step_out.loss_output.aligned_mse_loss),
                         "distance_loss": float(step_out.loss_output.distance_loss),
                         "rmsd": float(step_out.loss_output.rmsd),
+                        "lddt": float(step_out.loss_output.lddt),
                         "grad_norm": float(step_out.grad_norm),
                         "learning_rate": float(step_out.learning_rate),
                         "wall_time_s": elapsed_s,
@@ -662,15 +673,17 @@ def run_training(config: RunConfig) -> TrainState:
                         metrics=(
                             f"loss={train_scalars['total_loss']:.4f} "
                             f"rmsd={train_scalars['rmsd']:.3f}A "
+                            f"lddt={train_scalars['lddt']:.3f} "
                             f"lr={train_scalars['learning_rate']:.2e}"
                         ),
                     )
                     _LOGGER.info(
-                        "step=%d/%d train_loss=%.4f rmsd=%.3f A grad_norm=%.2f lr=%.2e",
+                        "step=%d/%d train_loss=%.4f rmsd=%.3f A lddt=%.3f grad_norm=%.2f lr=%.2e",
                         step_idx,
                         config.num_steps,
                         train_scalars["total_loss"],
                         train_scalars["rmsd"],
+                        train_scalars["lddt"],
                         train_scalars["grad_norm"],
                         train_scalars["learning_rate"],
                     )
@@ -698,11 +711,12 @@ def run_training(config: RunConfig) -> TrainState:
                         primary_device,
                     )
                     _LOGGER.info(
-                        "step=%d/%d val_loss=%.4f val_rmsd=%.3f A",
+                        "step=%d/%d val_loss=%.4f val_rmsd=%.3f A val_lddt=%.3f",
                         step_idx,
                         config.num_steps,
                         val_metrics.total_loss,
                         val_metrics.rmsd,
+                        val_metrics.lddt,
                     )
 
                 if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
@@ -721,21 +735,20 @@ def run_training(config: RunConfig) -> TrainState:
                         split="val_sample",
                         scalars=dataclasses.asdict(sampling_metrics),
                     )
-                    if sampling_metrics.sampled_rmsd_mean < best_sampled_rmsd:
-                        best_sampled_rmsd = sampling_metrics.sampled_rmsd_mean
+                    if sampling_metrics.sampled_lddt_mean > best_sampled_lddt:
+                        best_sampled_lddt = sampling_metrics.sampled_lddt_mean
                         _save_state_checkpoint(
                             checkpoints_dir / "best.msgpack",
                             state,
                             primary_device,
                         )
                     _LOGGER.info(
-                        "step=%d/%d sampled_rmsd_mean=%.3f A "
-                        "sampled_rmsd_median=%.3f A (best=%.3f A)",
+                        "step=%d/%d sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f (best=%.3f)",
                         step_idx,
                         config.num_steps,
                         sampling_metrics.sampled_rmsd_mean,
-                        sampling_metrics.sampled_rmsd_median,
-                        best_sampled_rmsd,
+                        sampling_metrics.sampled_lddt_mean,
+                        best_sampled_lddt,
                     )
 
                 if step_idx < config.num_steps:

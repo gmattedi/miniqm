@@ -89,9 +89,12 @@ def test_evaluate_loss_and_sampling_rmsd_return_finite_metrics(tmp_path: pathlib
     assert np.isfinite(val_metrics.total_loss)
     assert np.isfinite(val_metrics.rmsd)
     assert val_metrics.rmsd >= 0.0
+    assert 0.0 <= val_metrics.lddt <= 1.0
     assert np.isfinite(sampling_metrics.sampled_rmsd_mean)
     assert np.isfinite(sampling_metrics.sampled_rmsd_median)
     assert sampling_metrics.sampled_rmsd_mean >= 0.0
+    assert 0.0 <= sampling_metrics.sampled_lddt_mean <= 1.0
+    assert 0.0 <= sampling_metrics.sampled_lddt_median <= 1.0
 
 
 def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path) -> None:
@@ -126,6 +129,7 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     assert report.num_molecules == 3
     assert np.isfinite(report.loss_metrics.total_loss)
     assert np.isfinite(report.sampling_metrics.sampled_rmsd_mean)
+    assert 0.0 <= report.sampling_metrics.sampled_lddt_mean <= 1.0
     assert 0.0 <= report.sampling_metrics.fraction_below_0_5a <= 1.0
     assert 0.0 <= report.sampling_metrics.fraction_below_1_0a <= 1.0
     saved_report = json.loads((run_dir / "test_metrics.json").read_text(encoding="utf-8"))

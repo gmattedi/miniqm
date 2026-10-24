@@ -8,7 +8,7 @@ import pytest
 
 from miniqm import runner
 from miniqm.data import schema
-from miniqm.training import train
+from miniqm.training import checkpoint, train
 
 
 def _write_split_parquet(path: pathlib.Path, num_rows: int = 4) -> pathlib.Path:
@@ -87,16 +87,20 @@ def test_main_cli_writes_tensorboard_events_checkpoints_and_metrics(
         )
     )
 
-    assert (run_dir / "config.json").is_file()
-    assert (run_dir / "checkpoints" / "latest.msgpack").is_file()
-    assert (run_dir / "checkpoints" / "best.msgpack").is_file()
+    active_run_dir = checkpoint.resolve_run_dir(run_dir)
+    assert active_run_dir.parent == run_dir
+    assert (active_run_dir / "config.json").is_file()
+    assert (active_run_dir / "checkpoints" / "latest.msgpack").is_file()
+    assert (active_run_dir / "checkpoints" / "best.msgpack").is_file()
 
-    metrics_lines = (run_dir / "metrics.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    metrics_lines = (
+        (active_run_dir / "metrics.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    )
     records = tuple(json.loads(line) for line in metrics_lines)
     splits_logged = {record["split"] for record in records}
     assert splits_logged == {"train", "val", "val_sample"}
 
-    event_files = tuple(run_dir.glob("events.out.tfevents.*"))
+    event_files = tuple(active_run_dir.glob("events.out.tfevents.*"))
     assert len(event_files) >= 1
 
     runner.eval_main(
@@ -111,7 +115,7 @@ def test_main_cli_writes_tensorboard_events_checkpoints_and_metrics(
             "2",
         )
     )
-    assert (run_dir / "test_metrics.json").is_file()
+    assert (active_run_dir / "test_metrics.json").is_file()
 
     sdf_path = tmp_path / "sampled.sdf"
     runner.sample_main(
