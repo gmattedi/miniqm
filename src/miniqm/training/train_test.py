@@ -191,3 +191,8 @@ def test_train_config_rejects_invalid_hyperparameters(
             max_grad_norm=float(kwargs.get("max_grad_norm", 1.0)),
             ema_decay=float(kwargs.get("ema_decay", 0.999)),
         )
+
+
+def test_run_config_rejects_invalid_num_devices() -> None:
+    with pytest.raises(ValueError, match="positive num_devices"):
+        train.RunConfig(num_devices=0)

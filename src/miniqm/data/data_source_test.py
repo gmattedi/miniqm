@@ -66,10 +66,14 @@ def test_data_source_loads_and_iterates_batches(tmp_path: pathlib.Path) -> None:
     batches = tuple(source.iter_batches(batch_size=2, drop_last=False))
 
     assert len(source) == 3
+    assert (tmp_path / "split_collated_4.npz").is_file()
     assert batches == (
         batch.collate_batch(molecules[:2], max_atoms=4),
         batch.collate_batch(molecules[2:], max_atoms=4),
     )
+
+    cached_source = data_source.DataSource(parquet_path, max_atoms=4)
+    assert tuple(cached_source.iter_batches(batch_size=2, drop_last=False)) == batches
 
 
 def test_data_source_drop_last_and_max_molecules(tmp_path: pathlib.Path) -> None:

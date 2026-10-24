@@ -5,12 +5,15 @@ import dataclasses
 import functools
 import json
 import logging
+import math
+import os
 import pathlib
 import time
 from typing import Final, cast
 
 from flax import typing as flax_typing
 import jax
+from jax import sharding as jax_sharding
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -101,6 +104,7 @@ class RunConfig:
     max_train_molecules: int | None = None
     max_val_molecules: int | None = 512
     sample_batch_size: int = 32
+    num_devices: int = 8
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -116,6 +120,8 @@ class RunConfig:
             raise ValueError(f"Expected positive sample_every, got {self.sample_every}.")
         if self.sample_batch_size <= 0:
             raise ValueError(f"Expected positive sample_batch_size, got {self.sample_batch_size}.")
+        if self.num_devices <= 0:
+            raise ValueError(f"Expected positive num_devices, got {self.num_devices}.")
 
 
 @jax.tree_util.register_dataclass
@@ -395,11 +401,49 @@ def _jit_train_step(
     return train_step(state, batch, config=config)
 
 
+def configure_cpu_devices(num_devices: int) -> None:
+    """Configures the default CPU platform and logical XLA CPU device count.
+
+    Args:
+        num_devices: Number of logical XLA CPU devices to expose when uninitialized.
+    """
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    try:
+        jax.config.update("jax_num_cpu_devices", num_devices)
+    except RuntimeError:
+        _LOGGER.debug(
+            "JAX backend already initialized; keeping %d active device(s).",
+            len(jax.devices()),
+        )
+
+
+def _build_device_shardings(
+    num_devices: int,
+    effective_batch_size: int,
+) -> tuple[jax.Device, jax_sharding.NamedSharding, jax_sharding.NamedSharding]:
+    """Configures CPU devices and builds replicated state and batch shardings."""
+    configure_cpu_devices(num_devices)
+    devices = jax.devices()
+    active_devices = tuple(devices[: math.gcd(len(devices), effective_batch_size)])
+    mesh = jax_sharding.Mesh(active_devices, ("batch",))
+    replicated_sharding = jax_sharding.NamedSharding(mesh, jax_sharding.PartitionSpec())
+    batch_sharding = jax_sharding.NamedSharding(mesh, jax_sharding.PartitionSpec("batch"))
+    _LOGGER.info(
+        "Running on %d %s device(s) (batch sharded across %d): %s",
+        len(devices),
+        jax.default_backend(),
+        len(active_devices),
+        ", ".join(str(device) for device in active_devices),
+    )
+    return devices[0], replicated_sharding, batch_sharding
+
+
 def _infinite_train_batches(
     train_source: data_source.DataSource,
     *,
     batch_size: int,
     seed: int,
+    sharding: jax_sharding.Sharding | None = None,
 ) -> Iterator[batch_lib.JaxBatch]:
     """Yields shuffled device batches indefinitely across training epochs."""
     drop_last = len(train_source) >= batch_size
@@ -411,7 +455,12 @@ def _infinite_train_batches(
             rng=epoch_rng,
             drop_last=drop_last,
         ):
-            yield host_batch.to_jax()
+            jax_batch = host_batch.to_jax()
+            yield (
+                jax_batch
+                if sharding is None
+                else cast("batch_lib.JaxBatch", jax.device_put(jax_batch, sharding))
+            )
         epoch += 1
 
 
@@ -475,14 +524,7 @@ def run_training(config: RunConfig) -> TrainState:
     checkpoints_dir = config.run_dir / "checkpoints"
     metrics_path = config.run_dir / "metrics.jsonl"
 
-    devices = jax.devices()
-    _LOGGER.info(
-        "Running on %d %s device(s): %s",
-        len(devices),
-        jax.default_backend(),
-        ", ".join(str(device) for device in devices),
-    )
-
+    configure_cpu_devices(config.num_devices)
     train_source = data_source.DataSource(
         config.train_path,
         max_molecules=config.max_train_molecules,
@@ -491,6 +533,11 @@ def run_training(config: RunConfig) -> TrainState:
         config.val_path,
         max_molecules=config.max_val_molecules,
     )
+    primary_device, replicated_sharding, batch_sharding = _build_device_shardings(
+        config.num_devices,
+        min(config.batch_size, len(train_source)),
+    )
+
     sample_val_batch = next(
         val_source.iter_batches(
             batch_size=min(config.sample_batch_size, len(val_source)),
@@ -498,20 +545,28 @@ def run_training(config: RunConfig) -> TrainState:
         )
     ).to_jax()
 
+    unsharded_first_batch = next(
+        train_source.iter_batches(
+            batch_size=config.batch_size,
+            drop_last=len(train_source) >= config.batch_size,
+        )
+    ).to_jax()
+    init_rng, eval_rng, sample_rng = jax.random.split(jax.random.key(config.seed), 3)
+    state = init_train_state(init_rng, unsharded_first_batch, config=config.train)
+    _LOGGER.info("Parameter summary: %s", format_parameter_summary(state.params))
+    _LOGGER.info(
+        "Model architecture:\n%s",
+        tabulate_model(unsharded_first_batch, config=config.train.model),
+    )
+
+    state = cast("TrainState", jax.device_put(state, replicated_sharding))
     batch_iter = _infinite_train_batches(
         train_source,
         batch_size=config.batch_size,
         seed=config.seed,
+        sharding=batch_sharding,
     )
     first_batch = next(batch_iter)
-
-    init_rng, eval_rng, sample_rng = jax.random.split(jax.random.key(config.seed), 3)
-    state = init_train_state(init_rng, first_batch, config=config.train)
-    _LOGGER.info("Parameter summary: %s", format_parameter_summary(state.params))
-    _LOGGER.info(
-        "Model architecture:\n%s",
-        tabulate_model(first_batch, config=config.train.model),
-    )
 
     best_val_loss = float("inf")
     start_time = time.monotonic()
@@ -567,8 +622,10 @@ def run_training(config: RunConfig) -> TrainState:
                 )
 
             if step_idx % config.eval_every == 0 or step_idx == config.num_steps:
+                single_device_ema = jax.device_put(state.ema_params, primary_device)
+                single_device_params = jax.device_put(state.params, primary_device)
                 val_metrics = eval_lib.evaluate_loss(
-                    state.ema_params,
+                    single_device_ema,
                     eval_rng,
                     val_source,
                     batch_size=config.batch_size,
@@ -584,8 +641,8 @@ def run_training(config: RunConfig) -> TrainState:
                 )
                 ckpt_payload = checkpoint.Checkpoint(
                     step=int(state.step),
-                    params=state.params,
-                    ema_params=state.ema_params,
+                    params=single_device_params,
+                    ema_params=single_device_ema,
                 )
                 checkpoint.save_checkpoint(checkpoints_dir / "latest.msgpack", ckpt_payload)
                 if val_metrics.total_loss < best_val_loss:
@@ -601,8 +658,9 @@ def run_training(config: RunConfig) -> TrainState:
                 )
 
             if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
+                single_device_ema = jax.device_put(state.ema_params, primary_device)
                 sampling_metrics = eval_lib.evaluate_sampling_rmsd(
-                    state.ema_params,
+                    single_device_ema,
                     sample_rng,
                     sample_val_batch,
                     model_config=config.train.model,

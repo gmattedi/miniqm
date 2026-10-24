@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 import logging
+import os
 
 from rich import logging as rich_logging
 import tyro
@@ -11,7 +12,8 @@ from miniqm.training import train
 
 
 def _configure_logging() -> None:
-    """Configures Rich console logging for CLI entrypoints."""
+    """Configures default CPU platform and Rich console logging for CLI entrypoints."""
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
     logging.basicConfig(
         level=logging.INFO,
         format="%(message)s",

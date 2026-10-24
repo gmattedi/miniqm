@@ -2,7 +2,7 @@
 
 # Data & Graph Featurization
 
-Reads QM9 Parquet splits into unpadded molecule records, aligns 2D SMILES topology to 3D XYZ atom ordering, and collates fixed-shape batches padded to 29 atoms.
+Reads QM9 Parquet splits into unpadded molecule records, aligns 2D SMILES topology to 3D XYZ atom ordering across parallel worker processes, and collates and caches fixed-shape batches padded to 29 atoms.
 
 * Atom features encode one-hot atomic number (H, C, N, O, F), total degree, formal charge, hybridization, aromaticity, ring membership, and Cahn-Ingold-Prelog R/S chirality.
 * Bond features encode pairwise bond order (none, single, double, triple, aromatic) and ring membership across all atom pairs.
