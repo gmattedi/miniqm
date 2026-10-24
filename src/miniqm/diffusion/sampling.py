@@ -1,8 +1,9 @@
 """Reverse-time Karras Euler sampler with stochastic churn for 3D coordinate generation."""
 
 import dataclasses
+import functools
 import logging
-from typing import Final
+from typing import Final, cast
 
 from flax import typing as flax_typing
 import jax
@@ -88,33 +89,17 @@ def _euler_churn_step(
     return geometry.zero_center_of_mass(updated_positions, batch.atom_mask)
 
 
+@functools.partial(jax.jit, static_argnames=("denoiser", "config"))
 @jt.typed
-def sample_trajectory(
+def _integrate_trajectory(
     key: jt.Array,
     denoiser: model.Denoiser,
     params: flax_typing.VariableDict,
     *,
     batch: batch_lib.JaxBatch,
-    config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
+    config: SamplingConfig,
 ) -> jt.Float[jt.Array, "num_frames batch num_atoms 3"]:
-    """Generates the full reverse-diffusion coordinate trajectory from Gaussian noise.
-
-    Args:
-        key: JAX PRNG key.
-        denoiser: Configured denoiser module.
-        params: Initialized model parameters.
-        batch: Padded molecular graph features and valid-atom mask.
-        config: Reverse integration and stochastic churn parameters.
-
-    Returns:
-        Coordinate trajectory from initial noise (index 0) to final denoised coordinates (index -1).
-    """
-    _LOGGER.info(
-        "Sampling 3D coordinate trajectory over %d steps (gamma_0=%.2f, step_scale=%.2f).",
-        config.num_steps,
-        config.gamma_0,
-        config.step_scale,
-    )
+    """Integrates the reverse-diffusion coordinate trajectory in a compiled scan loop."""
     batch_size, num_atoms, _ = batch.atom_features.shape
     schedule = noise_lib.rollout_schedule(config.num_steps, config=config.noise)
 
@@ -153,6 +138,45 @@ def sample_trajectory(
     )
     # (num_steps + 1, batch, num_atoms, 3) full trajectory with initial noise prepended.
     return jnp.concatenate((initial_positions[None, ...], step_frames), axis=0)
+
+
+@jt.typed
+def sample_trajectory(
+    key: jt.Array,
+    denoiser: model.Denoiser,
+    params: flax_typing.VariableDict,
+    *,
+    batch: batch_lib.JaxBatch,
+    config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
+) -> jt.Float[jt.Array, "num_frames batch num_atoms 3"]:
+    """Generates the full reverse-diffusion coordinate trajectory from Gaussian noise.
+
+    Args:
+        key: JAX PRNG key.
+        denoiser: Configured denoiser module.
+        params: Initialized model parameters.
+        batch: Padded molecular graph features and valid-atom mask.
+        config: Reverse integration and stochastic churn parameters.
+
+    Returns:
+        Coordinate trajectory from initial noise (index 0) to final denoised coordinates (index -1).
+    """
+    _LOGGER.info(
+        "Sampling 3D coordinate trajectory over %d steps (gamma_0=%.2f, step_scale=%.2f).",
+        config.num_steps,
+        config.gamma_0,
+        config.step_scale,
+    )
+    return cast(
+        "jt.Float[jt.Array, 'num_frames batch num_atoms 3']",
+        _integrate_trajectory(
+            key,
+            denoiser,
+            params,
+            batch=batch,
+            config=config,
+        ),
+    )
 
 
 @jt.typed

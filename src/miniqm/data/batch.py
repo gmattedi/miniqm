@@ -7,11 +7,13 @@ from typing import Final, override
 import jax
 import jax.numpy as jnp
 import numpy as np
-from rdkit import Chem
+from rdkit import Chem, rdBase
 from rdkit.Chem import rdDetermineBonds
 
 from miniqm import jaxtypes as jt
 from miniqm.data import schema
+
+rdBase.DisableLog("rdApp.*")
 
 MAX_ATOMS: Final = 29
 _SPATIAL_DIMS: Final = 3

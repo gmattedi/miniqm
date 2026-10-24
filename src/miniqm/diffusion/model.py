@@ -127,12 +127,12 @@ class _TransformerBlock(nn.Module):
         # (batch, num_atoms, 1) expanded valid-atom mask.
         mask_3d = atom_mask[..., None]
 
-        mod_params = nn.Dense(2 * hidden_dim)(nn.silu(noise_cond))
+        mod_params = nn.Dense(2 * hidden_dim, name="adaln_proj")(nn.silu(noise_cond))
         # (batch, 1, hidden_dim) per-molecule AdaLN scale and shift broadcast across atoms.
         scale, shift = jnp.split(mod_params[:, None, :], 2, axis=-1)
-        norm_act = nn.LayerNorm()(act) * (1.0 + scale) + shift
+        norm_act = nn.LayerNorm(name="attn_norm")(act) * (1.0 + scale) + shift
 
-        qkv = nn.Dense(3 * hidden_dim, use_bias=False)(norm_act)
+        qkv = nn.Dense(3 * hidden_dim, use_bias=False, name="qkv_proj")(norm_act)
         # (batch, num_atoms, 3, num_heads, head_dim) unpacked into Q, K, V per head.
         qkv = qkv.reshape(batch_size, num_atoms, 3, num_heads, head_dim)
         queries, keys, values = (
@@ -155,10 +155,12 @@ class _TransformerBlock(nn.Module):
             num_atoms,
             hidden_dim,
         )
-        act = jnp.asarray((act + nn.Dense(hidden_dim)(attn_out)) * mask_3d)
+        act = jnp.asarray((act + nn.Dense(hidden_dim, name="out_proj")(attn_out)) * mask_3d)
 
-        mlp_hidden = nn.Dense(hidden_dim * self.config.mlp_factor)(nn.LayerNorm()(act))
-        mlp_out = nn.Dense(hidden_dim)(nn.silu(mlp_hidden))
+        mlp_hidden = nn.Dense(hidden_dim * self.config.mlp_factor, name="mlp_fc1")(
+            nn.LayerNorm(name="mlp_norm")(act)
+        )
+        mlp_out = nn.Dense(hidden_dim, name="mlp_fc2")(nn.silu(mlp_hidden))
         return jnp.asarray((act + mlp_out) * mask_3d)
 
 
@@ -209,14 +211,15 @@ class Denoiser(nn.Module):
             sigma_data=self.config.noise.sigma_data,
             config=self.config.fourier,
         )
-        noise_cond = nn.Dense(transformer_config.hidden_dim)(
-            nn.silu(nn.Dense(transformer_config.hidden_dim)(fourier_sigma))
+        noise_cond = nn.Dense(transformer_config.hidden_dim, name="sigma_mlp_1")(
+            nn.silu(nn.Dense(transformer_config.hidden_dim, name="sigma_mlp_0")(fourier_sigma))
         )
 
         atom_inputs = jnp.concatenate((batch.atom_features, scaled_positions), axis=-1)
         # (batch, num_atoms, hidden_dim) atom embeddings plus broadcast noise_cond (batch, 1, D).
         act = (
-            nn.Dense(transformer_config.hidden_dim)(atom_inputs) + noise_cond[:, None, :]
+            nn.Dense(transformer_config.hidden_dim, name="atom_proj")(atom_inputs)
+            + noise_cond[:, None, :]
         ) * mask_3d
 
         pair_inputs = _pairwise_geometry_features(
@@ -225,11 +228,14 @@ class Denoiser(nn.Module):
             batch.atom_mask,
         )
         pair_hidden = nn.silu(
-            nn.Dense(transformer_config.hidden_dim // 2)(nn.LayerNorm()(pair_inputs))
+            nn.Dense(transformer_config.hidden_dim // 2, name="pair_mlp_0")(
+                nn.LayerNorm(name="pair_norm")(pair_inputs)
+            )
         )
-        pair_biases = nn.Dense(transformer_config.num_layers * transformer_config.num_heads)(
-            pair_hidden
-        )
+        pair_biases = nn.Dense(
+            transformer_config.num_layers * transformer_config.num_heads,
+            name="pair_mlp_1",
+        )(pair_hidden)
         # (batch, num_layers, num_heads, num_atoms, num_atoms) per-layer attention logit biases.
         pair_biases = pair_biases.reshape(
             batch_size,
@@ -240,14 +246,16 @@ class Denoiser(nn.Module):
         ).transpose(0, 3, 4, 1, 2)
 
         for layer_idx in range(transformer_config.num_layers):
-            act = _TransformerBlock(config=transformer_config)(
+            act = _TransformerBlock(config=transformer_config, name=f"block_{layer_idx}")(
                 act,
                 noise_cond=noise_cond,
                 pair_bias=pair_biases[:, layer_idx],
                 atom_mask=batch.atom_mask,
             )
 
-        raw_output = nn.Dense(_SPATIAL_DIMS)(nn.LayerNorm()(act))
+        raw_output = nn.Dense(_SPATIAL_DIMS, name="coord_head")(
+            nn.LayerNorm(name="output_norm")(act)
+        )
         # (batch, num_atoms, 3) Karras skip + output combination with (batch, 1, 1) coefficients.
         denoised_positions = (
             factors.c_skip[:, None, None] * noisy_positions

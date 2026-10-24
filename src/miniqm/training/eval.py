@@ -102,6 +102,26 @@ def eval_step(
     )
 
 
+@functools.partial(jax.jit, static_argnames=("model_config", "loss_config"))
+@jt.typed
+def _jit_eval_step(
+    params: flax_typing.VariableDict,
+    rng: jt.Array,
+    batch: batch_lib.JaxBatch,
+    *,
+    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
+    loss_config: losses_lib.LossConfig = losses_lib.DEFAULT_LOSS_CONFIG,
+) -> losses_lib.LossOutput:
+    """Evaluates the diffusion loss on a batch under a cached JIT compilation."""
+    return eval_step(
+        params,
+        rng,
+        batch,
+        model_config=model_config,
+        loss_config=loss_config,
+    )
+
+
 @jt.typed
 def evaluate_loss(
     params: flax_typing.VariableDict,
@@ -125,9 +145,6 @@ def evaluate_loss(
     Returns:
         Mean validation loss components across all batches.
     """
-    jit_eval = jax.jit(
-        functools.partial(eval_step, model_config=model_config, loss_config=loss_config)
-    )
     totals: list[float] = []
     mses: list[float] = []
     dists: list[float] = []
@@ -139,7 +156,16 @@ def evaluate_loss(
         drop_last=False,
     ):
         step_rng, batch_rng = jax.random.split(step_rng)
-        loss_out = cast("losses_lib.LossOutput", jit_eval(params, batch_rng, host_batch.to_jax()))
+        loss_out = cast(
+            "losses_lib.LossOutput",
+            _jit_eval_step(
+                params,
+                batch_rng,
+                host_batch.to_jax(),
+                model_config=model_config,
+                loss_config=loss_config,
+            ),
+        )
         totals.append(float(loss_out.total_loss))
         mses.append(float(loss_out.aligned_mse_loss))
         dists.append(float(loss_out.distance_loss))
