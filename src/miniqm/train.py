@@ -1,19 +1,31 @@
-"""Training state, Optax optimizer schedule, and JIT-ready train/eval steps."""
+"""Training state, Optax optimizer schedule, JIT train step, and experiment loop."""
 
+from collections.abc import Iterator, Mapping
 import dataclasses
+import functools
+import json
+import logging
+import pathlib
+import time
 from typing import Final, cast
 
 from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
+import tensorboardX
 
 from miniqm import batch as batch_lib
+from miniqm import checkpoint, data_source
+from miniqm import eval as eval_lib
 from miniqm import jaxtypes as jt
 from miniqm import losses as losses_lib
 from miniqm import model as model_lib
 from miniqm import noise as noise_lib
+from miniqm import sampling as sampling_lib
 
+_LOGGER: Final = logging.getLogger(__name__)
 _SPATIAL_DIMS: Final = 3
 
 
@@ -66,6 +78,40 @@ class TrainConfig:
 
 
 DEFAULT_TRAIN_CONFIG: Final = TrainConfig()
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class RunConfig:
+    """End-to-end configuration for the training, evaluation, and checkpointing loop."""
+
+    train_path: pathlib.Path = pathlib.Path("data/train.parquet")
+    val_path: pathlib.Path = pathlib.Path("data/validation.parquet")
+    run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
+    train: TrainConfig = DEFAULT_TRAIN_CONFIG
+    sampling: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG
+    batch_size: int = 64
+    num_steps: int = 50_000
+    log_every: int = 50
+    eval_every: int = 500
+    sample_every: int = 1_000
+    max_train_molecules: int | None = None
+    max_val_molecules: int | None = 512
+    sample_batch_size: int = 32
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.batch_size <= 0:
+            raise ValueError(f"Expected positive batch_size, got {self.batch_size}.")
+        if self.num_steps <= 0:
+            raise ValueError(f"Expected positive num_steps, got {self.num_steps}.")
+        if self.log_every <= 0:
+            raise ValueError(f"Expected positive log_every, got {self.log_every}.")
+        if self.eval_every <= 0:
+            raise ValueError(f"Expected positive eval_every, got {self.eval_every}.")
+        if self.sample_every <= 0:
+            raise ValueError(f"Expected positive sample_every, got {self.sample_every}.")
+        if self.sample_batch_size <= 0:
+            raise ValueError(f"Expected positive sample_batch_size, got {self.sample_batch_size}.")
 
 
 @jax.tree_util.register_dataclass
@@ -185,34 +231,6 @@ def init_train_state(
 
 
 @jt.typed
-def _compute_batch_loss(
-    params: flax_typing.VariableDict,
-    noisy_sample: noise_lib.NoisySample,
-    batch: batch_lib.JaxBatch,
-    *,
-    config: TrainConfig,
-) -> losses_lib.LossOutput:
-    """Runs the denoiser on a corrupted sample and evaluates the diffusion training loss."""
-    denoiser = model_lib.Denoiser(config=config.model)
-    predicted_positions = cast(
-        "jt.Float[jt.Array, 'batch num_atoms 3']",
-        denoiser.apply(
-            params,
-            noisy_sample.noisy_positions,
-            noisy_sample.sigma,
-            batch=batch,
-        ),
-    )
-    return losses_lib.compute_diffusion_loss(
-        predicted_positions=predicted_positions,
-        target_positions=noisy_sample.target_positions,
-        sigma=noisy_sample.sigma,
-        atom_mask=batch.atom_mask,
-        config=config.loss,
-    )
-
-
-@jt.typed
 def train_step(
     state: TrainState,
     batch: batch_lib.JaxBatch,
@@ -240,7 +258,13 @@ def train_step(
     def _loss_fn(
         params: flax_typing.VariableDict,
     ) -> tuple[jt.Float[jt.Array, ""], losses_lib.LossOutput]:
-        loss_out = _compute_batch_loss(params, noisy_sample, batch, config=config)
+        loss_out = eval_lib.compute_batch_loss(
+            params,
+            noisy_sample,
+            batch,
+            model_config=config.model,
+            loss_config=config.loss,
+        )
         return loss_out.total_loss, loss_out
 
     (_, loss_output), grads = jax.value_and_grad(_loss_fn, has_aux=True)(state.params)
@@ -293,10 +317,195 @@ def eval_step(
     Returns:
         Diffusion loss breakdown on the randomly rotated and corrupted batch.
     """
-    noisy_sample = noise_lib.make_noisy_sample(
+    return eval_lib.eval_step(
+        params,
         rng,
-        batch.positions,
-        batch.atom_mask,
-        config=config.model.noise,
+        batch,
+        model_config=config.model,
+        loss_config=config.loss,
     )
-    return _compute_batch_loss(params, noisy_sample, batch, config=config)
+
+
+def _infinite_train_batches(
+    train_source: data_source.DataSource,
+    *,
+    batch_size: int,
+    seed: int,
+) -> Iterator[batch_lib.JaxBatch]:
+    """Yields shuffled device batches indefinitely across training epochs."""
+    drop_last = len(train_source) >= batch_size
+    epoch = 0
+    while True:
+        epoch_rng = np.random.default_rng(seed + epoch)
+        for host_batch in train_source.iter_batches(
+            batch_size=batch_size,
+            rng=epoch_rng,
+            drop_last=drop_last,
+        ):
+            yield host_batch.to_jax()
+        epoch += 1
+
+
+def _write_scalars(
+    writer: tensorboardX.SummaryWriter,
+    metrics_path: pathlib.Path,
+    *,
+    step: int,
+    split: str,
+    scalars: Mapping[str, float],
+) -> None:
+    """Logs scalar metrics to both TensorBoardX and `metrics.jsonl`."""
+    for name, value in scalars.items():
+        writer.add_scalar(f"{split}/{name}", value, global_step=step)
+    writer.flush()
+    record = {"step": step, "split": split, **scalars}
+    with metrics_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def run_training(config: RunConfig) -> TrainState:
+    """Executes the full training, validation, sampling, and checkpointing loop.
+
+    Args:
+        config: End-to-end training and evaluation configuration.
+
+    Returns:
+        Final `TrainState` after `config.num_steps` optimization steps.
+    """
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir = config.run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = config.run_dir / "metrics.jsonl"
+
+    config_dict = dataclasses.asdict(config)
+    for path_key in ("train_path", "val_path", "run_dir"):
+        config_dict[path_key] = str(config_dict[path_key])
+    (config.run_dir / "config.json").write_text(
+        json.dumps(config_dict, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    train_source = data_source.DataSource(
+        config.train_path,
+        max_molecules=config.max_train_molecules,
+    )
+    val_source = data_source.DataSource(
+        config.val_path,
+        max_molecules=config.max_val_molecules,
+    )
+    sample_val_batch = next(
+        val_source.iter_batches(
+            batch_size=min(config.sample_batch_size, len(val_source)),
+            drop_last=False,
+        )
+    ).to_jax()
+
+    batch_iter = _infinite_train_batches(
+        train_source,
+        batch_size=config.batch_size,
+        seed=config.seed,
+    )
+    first_batch = next(batch_iter)
+
+    init_rng, eval_rng, sample_rng = jax.random.split(jax.random.key(config.seed), 3)
+    state = init_train_state(init_rng, first_batch, config=config.train)
+    jit_train_step = jax.jit(functools.partial(train_step, config=config.train))
+
+    best_val_loss = float("inf")
+    start_time = time.monotonic()
+
+    with tensorboardX.SummaryWriter(logdir=str(config.run_dir)) as writer:
+        current_batch = first_batch
+        for step_idx in range(1, config.num_steps + 1):
+            step_out = cast("TrainStepOutput", jit_train_step(state, current_batch))
+            state = step_out.state
+
+            if step_idx % config.log_every == 0 or step_idx in {1, config.num_steps}:
+                elapsed_s = time.monotonic() - start_time
+                train_scalars = {
+                    "total_loss": float(step_out.loss_output.total_loss),
+                    "aligned_mse_loss": float(step_out.loss_output.aligned_mse_loss),
+                    "distance_loss": float(step_out.loss_output.distance_loss),
+                    "rmsd": float(step_out.loss_output.rmsd),
+                    "grad_norm": float(step_out.grad_norm),
+                    "learning_rate": float(step_out.learning_rate),
+                    "wall_time_s": elapsed_s,
+                }
+                _write_scalars(
+                    writer,
+                    metrics_path,
+                    step=step_idx,
+                    split="train",
+                    scalars=train_scalars,
+                )
+                _LOGGER.info(
+                    "step=%d/%d train_loss=%.4f rmsd=%.3f A grad_norm=%.2f lr=%.2e",
+                    step_idx,
+                    config.num_steps,
+                    train_scalars["total_loss"],
+                    train_scalars["rmsd"],
+                    train_scalars["grad_norm"],
+                    train_scalars["learning_rate"],
+                )
+
+            if step_idx % config.eval_every == 0 or step_idx == config.num_steps:
+                val_metrics = eval_lib.evaluate_loss(
+                    state.ema_params,
+                    eval_rng,
+                    val_source,
+                    batch_size=config.batch_size,
+                    model_config=config.train.model,
+                    loss_config=config.train.loss,
+                )
+                _write_scalars(
+                    writer,
+                    metrics_path,
+                    step=step_idx,
+                    split="val",
+                    scalars=dataclasses.asdict(val_metrics),
+                )
+                ckpt_payload = checkpoint.Checkpoint(
+                    step=int(state.step),
+                    params=state.params,
+                    ema_params=state.ema_params,
+                )
+                checkpoint.save_checkpoint(checkpoints_dir / "latest.msgpack", ckpt_payload)
+                if val_metrics.total_loss < best_val_loss:
+                    best_val_loss = val_metrics.total_loss
+                    checkpoint.save_checkpoint(checkpoints_dir / "best.msgpack", ckpt_payload)
+                _LOGGER.info(
+                    "step=%d/%d val_loss=%.4f val_rmsd=%.3f A (best=%.4f)",
+                    step_idx,
+                    config.num_steps,
+                    val_metrics.total_loss,
+                    val_metrics.rmsd,
+                    best_val_loss,
+                )
+
+            if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
+                sampling_metrics = eval_lib.evaluate_sampling_rmsd(
+                    state.ema_params,
+                    sample_rng,
+                    sample_val_batch,
+                    model_config=config.train.model,
+                    sampling_config=config.sampling,
+                )
+                _write_scalars(
+                    writer,
+                    metrics_path,
+                    step=step_idx,
+                    split="val_sample",
+                    scalars=dataclasses.asdict(sampling_metrics),
+                )
+                _LOGGER.info(
+                    "step=%d/%d sampled_rmsd_mean=%.3f A sampled_rmsd_median=%.3f A",
+                    step_idx,
+                    config.num_steps,
+                    sampling_metrics.sampled_rmsd_mean,
+                    sampling_metrics.sampled_rmsd_median,
+                )
+
+            if step_idx < config.num_steps:
+                current_batch = next(batch_iter)
+
+    return state

@@ -15,12 +15,18 @@ dependencies = [
     "jaxtyping>=0.3.11",
     "optax>=0.2.8",
     "pandas>=3.1.0",
+    "py3dmol>=2.5.5",
     "pyarrow>=26.0.0",
     "rdkit>=2026.9.1",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
+    "tensorboardx>=2.6.5",
     "typeguard==2.13.3",
+    "tyro>=0.9.1",
 ]
+
+[project.scripts]
+miniqm-train = "miniqm.runner:main"
 
 [dependency-groups]
 dev = [
