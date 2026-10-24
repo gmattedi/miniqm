@@ -26,3 +26,7 @@ wandb/
 *.swp
 .idea/
 .vscode/
+
+AGENTS.md
+CLAUDE.md
+GEMINI.md
