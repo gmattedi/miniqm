@@ -28,6 +28,12 @@ wandb/
 .idea/
 .vscode/
 
+# Markdown
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+
+# Training runs
+runs/
+
+*.npz
