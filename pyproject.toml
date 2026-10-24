@@ -28,6 +28,8 @@ dependencies = [
 
 [project.scripts]
 miniqm-train = "miniqm.runner:main"
+miniqm-eval = "miniqm.runner:eval_main"
+miniqm-sample = "miniqm.runner:sample_main"
 
 [dependency-groups]
 dev = [

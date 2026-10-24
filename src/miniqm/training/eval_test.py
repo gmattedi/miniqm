@@ -1,3 +1,4 @@
+import json
 import pathlib
 from typing import Final
 
@@ -5,11 +6,12 @@ import jax
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from miniqm.data import data_source, schema
 from miniqm.diffusion import losses, model, sampling
+from miniqm.training import checkpoint, train
 from miniqm.training import eval as eval_lib
-from miniqm.training import train
 
 _TINY_MODEL_CONFIG: Final = model.DenoiserConfig(
     transformer=model.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
@@ -89,3 +91,67 @@ def test_evaluate_loss_and_sampling_rmsd_return_finite_metrics(tmp_path: pathlib
     assert np.isfinite(sampling_metrics.sampled_rmsd_mean)
     assert np.isfinite(sampling_metrics.sampled_rmsd_median)
     assert sampling_metrics.sampled_rmsd_mean >= 0.0
+
+
+def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path) -> None:
+    parquet_path = _write_sample_parquet(tmp_path / "test.parquet", num_rows=3)
+    test_source = data_source.DataSource(parquet_path)
+    first_batch = next(test_source.iter_batches(batch_size=3, drop_last=False)).to_jax()
+    train_config = train.TrainConfig(model=_TINY_MODEL_CONFIG)
+    state = train.init_train_state(jax.random.key(0), first_batch, config=train_config)
+
+    run_dir = tmp_path / "run"
+    train.write_run_config(
+        train.RunConfig(
+            run_dir=run_dir,
+            train=train_config,
+            sampling=sampling.SamplingConfig(num_steps=3),
+        )
+    )
+    checkpoint.save_checkpoint(
+        run_dir / "checkpoints" / "best.msgpack",
+        checkpoint.Checkpoint(step=5, params=state.params, ema_params=state.ema_params),
+    )
+
+    report = eval_lib.run_evaluation(
+        eval_lib.EvalConfig(
+            run_dir=run_dir,
+            test_path=parquet_path,
+            batch_size=2,
+            num_sampling_steps=2,
+        )
+    )
+    assert report.step == 5
+    assert report.num_molecules == 3
+    assert np.isfinite(report.loss_metrics.total_loss)
+    assert np.isfinite(report.sampling_metrics.sampled_rmsd_mean)
+    assert 0.0 <= report.sampling_metrics.fraction_below_0_5a <= 1.0
+    assert 0.0 <= report.sampling_metrics.fraction_below_1_0a <= 1.0
+    saved_report = json.loads((run_dir / "test_metrics.json").read_text(encoding="utf-8"))
+    assert saved_report["step"] == 5
+
+    smiles_file = tmp_path / "molecules.smi"
+    smiles_file.write_text("F\nO\n", encoding="utf-8")
+    output_xyz = tmp_path / "out.xyz"
+    xyz_content = eval_lib.run_smiles_sampling(
+        eval_lib.SampleSmilesConfig(
+            run_dir=run_dir,
+            smiles_file=smiles_file,
+            num_sampling_steps=2,
+            output_xyz=output_xyz,
+        )
+    )
+    assert output_xyz.is_file()
+    assert xyz_content.startswith("2\nF\n")
+    assert "\n3\nO\n" in xyz_content
+
+
+def test_eval_and_sample_configs_reject_invalid_values() -> None:
+    with pytest.raises(ValueError, match="positive batch_size"):
+        eval_lib.EvalConfig(batch_size=0)
+
+    with pytest.raises(ValueError, match="positive num_sampling_steps"):
+        eval_lib.EvalConfig(num_sampling_steps=0)
+
+    with pytest.raises(ValueError, match="positive num_sampling_steps"):
+        eval_lib.SampleSmilesConfig(num_sampling_steps=0)

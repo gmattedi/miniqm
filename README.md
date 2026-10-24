@@ -16,13 +16,20 @@ It predicts equilibrium 3D atomic coordinates directly in Cartesian $\mathbb{R}^
 Prepare the QM9 train, validation, and test Parquet splits:
 
 ```bash
-uv run python data/prepare_qm9.py
+uv run python data/download_qm9.py
 ```
 
 Run training and periodic validation:
 
 ```bash
 uv run miniqm-train --run-dir runs/qm9_experiment
+```
+
+Evaluate a saved run on the test split or sample 3D conformers from arbitrary SMILES:
+
+```bash
+uv run miniqm-eval --run-dir runs/qm9_experiment --test-path data/test.parquet
+uv run miniqm-sample --run-dir runs/qm9_experiment --smiles CCO c1ccccc1 --output-xyz conformers.xyz
 ```
 
 Run lint, type checking, and tests:
