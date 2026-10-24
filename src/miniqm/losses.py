@@ -23,6 +23,7 @@ class LossConfig:
     distance_cutoff: float = 5.0
 
 
+@jax.tree_util.register_dataclass
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class AlignedMseStats:
@@ -32,6 +33,7 @@ class AlignedMseStats:
     rmsd: jt.Float[jt.Array, ""]
 
 
+@jax.tree_util.register_dataclass
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class LossOutput:

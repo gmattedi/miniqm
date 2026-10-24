@@ -27,6 +27,7 @@ class NoiseConfig:
 DEFAULT_NOISE_CONFIG: Final = NoiseConfig()
 
 
+@jax.tree_util.register_dataclass
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PreconditioningFactors:
@@ -38,6 +39,7 @@ class PreconditioningFactors:
     loss_weight: jt.Float[jt.Array, "*batch"]
 
 
+@jax.tree_util.register_dataclass
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class NoisySample:
