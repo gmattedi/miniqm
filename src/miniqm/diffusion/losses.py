@@ -16,7 +16,13 @@ _DIST_EPS: Final = 1e-8
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class LossConfig:
-    """Loss weighting and cutoff parameters for 3D coordinate diffusion training."""
+    """Loss weighting and cutoff parameters for 3D coordinate diffusion training.
+
+    Attributes:
+        noise: Karras EDM noise distribution and loss-weight parameters.
+        distance_loss_weight: Multiplier on the auxiliary local pairwise distance MSE loss.
+        distance_cutoff: Ground-truth interatomic distance threshold in Angstroms for pair masking.
+    """
 
     noise: noise_lib.NoiseConfig = dataclasses.field(default_factory=noise_lib.NoiseConfig)
     distance_loss_weight: float = 0.25

@@ -23,7 +23,14 @@ _DIST_EPS: Final = 1e-8
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TransformerConfig:
-    """Architecture hyperparameters for the pair-biased Transformer stack."""
+    """Architecture hyperparameters for the pair-biased Transformer stack.
+
+    Attributes:
+        hidden_dim: Per-atom token embedding dimension.
+        num_layers: Number of stacked pair-biased Transformer blocks.
+        num_heads: Number of attention heads per Transformer block.
+        mlp_factor: Expansion ratio of the SwiGLU feed-forward hidden dimension.
+    """
 
     hidden_dim: int = 128
     num_layers: int = 4
@@ -40,16 +47,26 @@ class TransformerConfig:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class FourierNoiseConfig:
-    """Sinusoidal Fourier embedding parameters for log-noise conditioning."""
+    """Sinusoidal Fourier embedding parameters for log-noise conditioning.
 
-    # Karras et al. (2022) c_noise(sigma) = 0.25 * ln(sigma / sigma_data).
+    Attributes:
+        log_sigma_scale: Pre-multiplier applied to the log-noise ratio before embedding.
+        max_period: Maximum wavelength controlling minimum sinusoidal frequency.
+    """
+
     log_sigma_scale: float = 0.25
     max_period: float = 100.0
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class DenoiserConfig:
-    """Complete configuration for the 3D molecular coordinate denoiser."""
+    """Complete configuration for the 3D molecular coordinate denoiser.
+
+    Attributes:
+        transformer: Pair-biased Transformer architecture hyperparameters.
+        fourier: Sinusoidal Fourier log-noise embedding configuration.
+        noise: Karras EDM noise distribution and preconditioning parameters.
+    """
 
     transformer: TransformerConfig = dataclasses.field(default_factory=TransformerConfig)
     fourier: FourierNoiseConfig = dataclasses.field(default_factory=FourierNoiseConfig)

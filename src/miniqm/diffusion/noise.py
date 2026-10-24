@@ -13,9 +13,17 @@ from miniqm.diffusion import geometry
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class NoiseConfig:
-    """Karras EDM noise distribution and rollout schedule parameters."""
+    """Karras EDM noise distribution and rollout schedule parameters.
 
-    # Empirical coordinate std (1.20 A) across zero-centered QM9 train molecules.
+    Attributes:
+        sigma_data: Empirical coordinate standard deviation in Angstroms across zero-centered QM9.
+        s_min: Minimum relative noise multiplier at the end of reverse rollout.
+        s_max: Maximum relative noise multiplier at the start of reverse rollout.
+        rho: Polynomial exponent controlling step spacing in the Karras schedule.
+        log_sigma_mean: Mean of the log-normal training noise distribution.
+        log_sigma_std: Standard deviation of the log-normal training noise distribution.
+    """
+
     sigma_data: float = 1.2
     s_min: float = 4e-4
     s_max: float = 80.0

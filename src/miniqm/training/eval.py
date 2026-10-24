@@ -60,7 +60,19 @@ class DatasetSamplingMetrics:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class EvalConfig:
-    """Configuration for evaluating a trained checkpoint on a QM9 Parquet split."""
+    """Configuration for evaluating a trained checkpoint on a QM9 Parquet split.
+
+    Attributes:
+        run_dir: Training run directory containing saved configuration and checkpoints.
+        test_path: Path to the evaluation Parquet split.
+        checkpoint_name: Checkpoint filename inside the checkpoints subdirectory.
+        use_ema: Whether to evaluate EMA weights instead of raw optimizer weights.
+        batch_size: Number of molecules per evaluation batch.
+        max_test_molecules: Optional cap on the number of evaluated molecules.
+        num_sampling_steps: Optional override for the number of reverse Euler sampling steps.
+        output_path: Optional output JSON file path (defaults to test_metrics.json in run_dir).
+        seed: Random seed for teacher-forced evaluation and reverse-diffusion sampling.
+    """
 
     run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
     test_path: pathlib.Path = pathlib.Path("data/test.parquet")
@@ -93,7 +105,18 @@ class TestEvaluationReport:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SampleSmilesConfig:
-    """Configuration for generating 3D conformers from a sequence of SMILES strings."""
+    """Configuration for generating 3D conformers from a sequence of SMILES strings.
+
+    Attributes:
+        run_dir: Training run directory containing saved configuration and checkpoints.
+        smiles: Sequence of SMILES strings to sample when smiles_file is not provided.
+        smiles_file: Optional text file containing one SMILES string per line.
+        checkpoint_name: Checkpoint filename inside the checkpoints subdirectory.
+        use_ema: Whether to sample with EMA weights instead of raw optimizer weights.
+        num_sampling_steps: Optional override for the number of reverse Euler sampling steps.
+        output_sdf: Destination SDF file path for the generated 3D conformers.
+        seed: Random seed for reverse-diffusion sampling.
+    """
 
     run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
     smiles: tuple[str, ...] = ("CCO", "c1ccccc1")

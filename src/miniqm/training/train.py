@@ -89,7 +89,25 @@ DEFAULT_TRAIN_CONFIG: Final = TrainConfig()
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class RunConfig:
-    """End-to-end configuration for the training, evaluation, and checkpointing loop."""
+    """End-to-end configuration for the training, evaluation, and checkpointing loop.
+
+    Attributes:
+        train_path: Path to the training split Parquet file.
+        val_path: Path to the validation split Parquet file.
+        run_dir: Output directory for checkpoints, TensorBoard events, and JSONL metrics.
+        train: Model, loss, and optimizer hyperparameter configuration.
+        sampling: Reverse-diffusion conformer sampling configuration for validation.
+        batch_size: Number of molecules per training and validation batch.
+        num_steps: Total number of optimization steps to run.
+        log_every: Step interval between training scalar log entries.
+        eval_every: Step interval between full validation loss evaluations and checkpoints.
+        sample_every: Step interval between reverse-diffusion conformer RMSD evaluations.
+        max_train_molecules: Optional cap on the number of loaded training molecules.
+        max_val_molecules: Optional cap on the number of loaded validation molecules.
+        sample_batch_size: Number of validation molecules used for periodic conformer sampling.
+        num_devices: Number of logical XLA CPU devices to use for batch sharding.
+        seed: Base random seed for parameter initialization, batch shuffling, and evaluation.
+    """
 
     train_path: pathlib.Path = pathlib.Path("data/train.parquet")
     val_path: pathlib.Path = pathlib.Path("data/validation.parquet")
@@ -511,6 +529,41 @@ def _make_progress() -> progress.Progress:
     )
 
 
+def _save_state_checkpoint(
+    path: pathlib.Path,
+    state: TrainState,
+    primary_device: jax.Device,
+) -> None:
+    """Serializes the current training state onto disk via the primary device."""
+    ckpt_payload = checkpoint.Checkpoint(
+        step=int(state.step),
+        params=jax.device_put(state.params, primary_device),
+        ema_params=jax.device_put(state.ema_params, primary_device),
+    )
+    checkpoint.save_checkpoint(path, ckpt_payload)
+
+
+def _save_interrupted_checkpoints(
+    checkpoints_dir: pathlib.Path,
+    state: TrainState,
+    primary_device: jax.Device,
+    *,
+    num_steps: int,
+) -> None:
+    """Persists the latest (and fallback best) checkpoint when training is interrupted."""
+    latest_path = checkpoints_dir / "latest.msgpack"
+    best_path = checkpoints_dir / "best.msgpack"
+    _save_state_checkpoint(latest_path, state, primary_device)
+    if not best_path.is_file():
+        _save_state_checkpoint(best_path, state, primary_device)
+    _LOGGER.warning(
+        "Training interrupted at step %d/%d; saved latest checkpoint to %s.",
+        int(state.step),
+        num_steps,
+        latest_path,
+    )
+
+
 def run_training(config: RunConfig) -> TrainState:
     """Executes the full training, validation, sampling, and checkpointing loop.
 
@@ -568,7 +621,7 @@ def run_training(config: RunConfig) -> TrainState:
     )
     first_batch = next(batch_iter)
 
-    best_val_loss = float("inf")
+    best_sampled_rmsd = float("inf")
     start_time = time.monotonic()
 
     with (
@@ -577,111 +630,122 @@ def run_training(config: RunConfig) -> TrainState:
     ):
         task_id = progress_bar.add_task("Training", total=config.num_steps, metrics="")
         current_batch = first_batch
-        for step_idx in range(1, config.num_steps + 1):
-            step_out = cast(
-                "TrainStepOutput",
-                _jit_train_step(state, current_batch, config=config.train),
+        try:
+            for step_idx in range(1, config.num_steps + 1):
+                step_out = cast(
+                    "TrainStepOutput",
+                    _jit_train_step(state, current_batch, config=config.train),
+                )
+                state = step_out.state
+                progress_bar.advance(task_id)
+
+                if step_idx % config.log_every == 0 or step_idx in {1, config.num_steps}:
+                    elapsed_s = time.monotonic() - start_time
+                    train_scalars = {
+                        "total_loss": float(step_out.loss_output.total_loss),
+                        "aligned_mse_loss": float(step_out.loss_output.aligned_mse_loss),
+                        "distance_loss": float(step_out.loss_output.distance_loss),
+                        "rmsd": float(step_out.loss_output.rmsd),
+                        "grad_norm": float(step_out.grad_norm),
+                        "learning_rate": float(step_out.learning_rate),
+                        "wall_time_s": elapsed_s,
+                    }
+                    _write_scalars(
+                        writer,
+                        metrics_path,
+                        step=step_idx,
+                        split="train",
+                        scalars=train_scalars,
+                    )
+                    progress_bar.update(
+                        task_id,
+                        metrics=(
+                            f"loss={train_scalars['total_loss']:.4f} "
+                            f"rmsd={train_scalars['rmsd']:.3f}A "
+                            f"lr={train_scalars['learning_rate']:.2e}"
+                        ),
+                    )
+                    _LOGGER.info(
+                        "step=%d/%d train_loss=%.4f rmsd=%.3f A grad_norm=%.2f lr=%.2e",
+                        step_idx,
+                        config.num_steps,
+                        train_scalars["total_loss"],
+                        train_scalars["rmsd"],
+                        train_scalars["grad_norm"],
+                        train_scalars["learning_rate"],
+                    )
+
+                if step_idx % config.eval_every == 0 or step_idx == config.num_steps:
+                    single_device_ema = jax.device_put(state.ema_params, primary_device)
+                    val_metrics = eval_lib.evaluate_loss(
+                        single_device_ema,
+                        eval_rng,
+                        val_source,
+                        batch_size=config.batch_size,
+                        model_config=config.train.model,
+                        loss_config=config.train.loss,
+                    )
+                    _write_scalars(
+                        writer,
+                        metrics_path,
+                        step=step_idx,
+                        split="val",
+                        scalars=dataclasses.asdict(val_metrics),
+                    )
+                    _save_state_checkpoint(
+                        checkpoints_dir / "latest.msgpack",
+                        state,
+                        primary_device,
+                    )
+                    _LOGGER.info(
+                        "step=%d/%d val_loss=%.4f val_rmsd=%.3f A",
+                        step_idx,
+                        config.num_steps,
+                        val_metrics.total_loss,
+                        val_metrics.rmsd,
+                    )
+
+                if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
+                    single_device_ema = jax.device_put(state.ema_params, primary_device)
+                    sampling_metrics = eval_lib.evaluate_sampling_rmsd(
+                        single_device_ema,
+                        sample_rng,
+                        sample_val_batch,
+                        model_config=config.train.model,
+                        sampling_config=config.sampling,
+                    )
+                    _write_scalars(
+                        writer,
+                        metrics_path,
+                        step=step_idx,
+                        split="val_sample",
+                        scalars=dataclasses.asdict(sampling_metrics),
+                    )
+                    if sampling_metrics.sampled_rmsd_mean < best_sampled_rmsd:
+                        best_sampled_rmsd = sampling_metrics.sampled_rmsd_mean
+                        _save_state_checkpoint(
+                            checkpoints_dir / "best.msgpack",
+                            state,
+                            primary_device,
+                        )
+                    _LOGGER.info(
+                        "step=%d/%d sampled_rmsd_mean=%.3f A "
+                        "sampled_rmsd_median=%.3f A (best=%.3f A)",
+                        step_idx,
+                        config.num_steps,
+                        sampling_metrics.sampled_rmsd_mean,
+                        sampling_metrics.sampled_rmsd_median,
+                        best_sampled_rmsd,
+                    )
+
+                if step_idx < config.num_steps:
+                    current_batch = next(batch_iter)
+        except KeyboardInterrupt:
+            _save_interrupted_checkpoints(
+                checkpoints_dir,
+                state,
+                primary_device,
+                num_steps=config.num_steps,
             )
-            state = step_out.state
-            progress_bar.advance(task_id)
-
-            if step_idx % config.log_every == 0 or step_idx in {1, config.num_steps}:
-                elapsed_s = time.monotonic() - start_time
-                train_scalars = {
-                    "total_loss": float(step_out.loss_output.total_loss),
-                    "aligned_mse_loss": float(step_out.loss_output.aligned_mse_loss),
-                    "distance_loss": float(step_out.loss_output.distance_loss),
-                    "rmsd": float(step_out.loss_output.rmsd),
-                    "grad_norm": float(step_out.grad_norm),
-                    "learning_rate": float(step_out.learning_rate),
-                    "wall_time_s": elapsed_s,
-                }
-                _write_scalars(
-                    writer,
-                    metrics_path,
-                    step=step_idx,
-                    split="train",
-                    scalars=train_scalars,
-                )
-                progress_bar.update(
-                    task_id,
-                    metrics=(
-                        f"loss={train_scalars['total_loss']:.4f} "
-                        f"rmsd={train_scalars['rmsd']:.3f}A "
-                        f"lr={train_scalars['learning_rate']:.2e}"
-                    ),
-                )
-                _LOGGER.info(
-                    "step=%d/%d train_loss=%.4f rmsd=%.3f A grad_norm=%.2f lr=%.2e",
-                    step_idx,
-                    config.num_steps,
-                    train_scalars["total_loss"],
-                    train_scalars["rmsd"],
-                    train_scalars["grad_norm"],
-                    train_scalars["learning_rate"],
-                )
-
-            if step_idx % config.eval_every == 0 or step_idx == config.num_steps:
-                single_device_ema = jax.device_put(state.ema_params, primary_device)
-                single_device_params = jax.device_put(state.params, primary_device)
-                val_metrics = eval_lib.evaluate_loss(
-                    single_device_ema,
-                    eval_rng,
-                    val_source,
-                    batch_size=config.batch_size,
-                    model_config=config.train.model,
-                    loss_config=config.train.loss,
-                )
-                _write_scalars(
-                    writer,
-                    metrics_path,
-                    step=step_idx,
-                    split="val",
-                    scalars=dataclasses.asdict(val_metrics),
-                )
-                ckpt_payload = checkpoint.Checkpoint(
-                    step=int(state.step),
-                    params=single_device_params,
-                    ema_params=single_device_ema,
-                )
-                checkpoint.save_checkpoint(checkpoints_dir / "latest.msgpack", ckpt_payload)
-                if val_metrics.total_loss < best_val_loss:
-                    best_val_loss = val_metrics.total_loss
-                    checkpoint.save_checkpoint(checkpoints_dir / "best.msgpack", ckpt_payload)
-                _LOGGER.info(
-                    "step=%d/%d val_loss=%.4f val_rmsd=%.3f A (best=%.4f)",
-                    step_idx,
-                    config.num_steps,
-                    val_metrics.total_loss,
-                    val_metrics.rmsd,
-                    best_val_loss,
-                )
-
-            if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
-                single_device_ema = jax.device_put(state.ema_params, primary_device)
-                sampling_metrics = eval_lib.evaluate_sampling_rmsd(
-                    single_device_ema,
-                    sample_rng,
-                    sample_val_batch,
-                    model_config=config.train.model,
-                    sampling_config=config.sampling,
-                )
-                _write_scalars(
-                    writer,
-                    metrics_path,
-                    step=step_idx,
-                    split="val_sample",
-                    scalars=dataclasses.asdict(sampling_metrics),
-                )
-                _LOGGER.info(
-                    "step=%d/%d sampled_rmsd_mean=%.3f A sampled_rmsd_median=%.3f A",
-                    step_idx,
-                    config.num_steps,
-                    sampling_metrics.sampled_rmsd_mean,
-                    sampling_metrics.sampled_rmsd_median,
-                )
-
-            if step_idx < config.num_steps:
-                current_batch = next(batch_iter)
 
     return state

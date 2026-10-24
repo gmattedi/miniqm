@@ -20,11 +20,19 @@ _SPATIAL_DIMS: Final = 3
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SamplingConfig:
-    """Reverse integration and stochastic churn parameters for Karras sampling."""
+    """Reverse integration and stochastic churn parameters for Karras sampling.
+
+    Attributes:
+        noise: Karras EDM noise rollout schedule configuration.
+        num_steps: Number of reverse Euler integration steps.
+        gamma_0: Fractional noise expansion rate during stochastic churn steps.
+        gamma_min: Minimum relative noise level above which stochastic churn is active.
+        noise_scale: Standard deviation multiplier for injected churn Gaussian noise.
+        step_scale: Velocity multiplier for the reverse Euler step size.
+    """
 
     noise: noise_lib.NoiseConfig = dataclasses.field(default_factory=noise_lib.NoiseConfig)
     num_steps: int = 40
-    # Karras et al. (2022) / AlphaFold 3 stochastic churn defaults.
     gamma_0: float = 0.8
     gamma_min: float = 0.1
     noise_scale: float = 1.003
