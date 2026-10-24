@@ -69,6 +69,7 @@ def _euler_churn_step(
         batch.atom_mask,
     )
 
+    # (batch,) per-molecule noise level broadcast from scalar sigma_hat.
     sigma_per_molecule = jnp.full((batch_size,), sigma_hat, dtype=positions.dtype)
     denoised_positions = jnp.asarray(
         denoiser.apply(
@@ -79,6 +80,7 @@ def _euler_churn_step(
         )
     )
 
+    # (batch, num_atoms, 3) empirical score direction (x_hat - D(x_hat, sigma_hat)) / sigma_hat.
     score_direction = (noisy_positions - denoised_positions) / sigma_hat
     updated_positions = (
         noisy_positions + config.step_scale * (sigma_next - sigma_hat) * score_direction

@@ -72,6 +72,7 @@ def _fourier_noise_embedding(
     c_noise = config.log_sigma_scale * jnp.log(sigma / sigma_data)
     freq_exponents = jnp.linspace(0.0, 1.0, half_dim, dtype=jnp.float32)
     frequencies = jnp.exp(-jnp.log(config.max_period) * freq_exponents)
+    # (batch, half_dim) outer product of c_noise (batch, 1) and frequencies (1, half_dim).
     angles = c_noise[:, None] * frequencies[None, :]
     return jnp.concatenate((jnp.sin(angles), jnp.cos(angles)), axis=-1)
 
@@ -83,8 +84,11 @@ def _pairwise_geometry_features(
     atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
 ) -> jt.Float[jt.Array, "batch num_atoms num_atoms num_pair_features"]:
     """Combines 2D bond features with 3D pairwise displacements and Euclidean distances."""
+    # (batch, num_atoms, num_atoms, 1) pairwise valid-atom mask.
     pair_mask = (atom_mask[:, :, None] & atom_mask[:, None, :])[..., None]
+    # (batch, num_atoms, num_atoms, 3) pairwise displacement vectors x_i - x_j.
     offsets = scaled_positions[:, :, None, :] - scaled_positions[:, None, :, :]
+    # (batch, num_atoms, num_atoms, 1) pairwise Euclidean distances ||x_i - x_j||.
     distances = jnp.sqrt(jnp.sum(jnp.square(offsets), axis=-1, keepdims=True) + _DIST_EPS)
     return jnp.concatenate((bond_features, offsets, distances), axis=-1) * pair_mask
 
@@ -120,13 +124,16 @@ class _TransformerBlock(nn.Module):
         hidden_dim = self.config.hidden_dim
         num_heads = self.config.num_heads
         head_dim = hidden_dim // num_heads
+        # (batch, num_atoms, 1) expanded valid-atom mask.
         mask_3d = atom_mask[..., None]
 
         mod_params = nn.Dense(2 * hidden_dim)(nn.silu(noise_cond))
+        # (batch, 1, hidden_dim) per-molecule AdaLN scale and shift broadcast across atoms.
         scale, shift = jnp.split(mod_params[:, None, :], 2, axis=-1)
         norm_act = nn.LayerNorm()(act) * (1.0 + scale) + shift
 
         qkv = nn.Dense(3 * hidden_dim, use_bias=False)(norm_act)
+        # (batch, num_atoms, 3, num_heads, head_dim) unpacked into Q, K, V per head.
         qkv = qkv.reshape(batch_size, num_atoms, 3, num_heads, head_dim)
         queries, keys, values = (
             qkv[:, :, 0],
@@ -134,12 +141,15 @@ class _TransformerBlock(nn.Module):
             qkv[:, :, 2],
         )
 
+        # (batch, num_heads, num_atoms, num_atoms) scaled dot-product attention logits.
         attn_logits = jnp.einsum("bihd,bjhd->bhij", queries, keys) / jnp.sqrt(jnp.float32(head_dim))
         attn_logits = attn_logits + pair_bias
+        # (batch, 1, 1, num_atoms) valid-key mask broadcast across heads and query atoms.
         key_mask = atom_mask[:, None, None, :]
         attn_logits = jnp.where(key_mask, attn_logits, _MASK_FILL_VALUE)
         attn_weights = jax.nn.softmax(attn_logits, axis=-1)
 
+        # (batch, num_atoms, hidden_dim) attention-weighted values merged across heads.
         attn_out = jnp.einsum("bhij,bjhd->bihd", attn_weights, values).reshape(
             batch_size,
             num_atoms,
@@ -186,9 +196,11 @@ class Denoiser(nn.Module):
         )
 
         batch_size, num_atoms, _ = noisy_positions.shape
+        # (batch, num_atoms, 1) expanded valid-atom mask.
         mask_3d = batch.atom_mask[..., None]
 
         factors = noise_lib.preconditioning_factors(sigma, config=self.config.noise)
+        # (batch, num_atoms, 3) input coordinates scaled by per-molecule c_in (batch, 1, 1).
         scaled_positions = (factors.c_in[:, None, None] * noisy_positions) * mask_3d
 
         fourier_sigma = _fourier_noise_embedding(
@@ -202,6 +214,7 @@ class Denoiser(nn.Module):
         )
 
         atom_inputs = jnp.concatenate((batch.atom_features, scaled_positions), axis=-1)
+        # (batch, num_atoms, hidden_dim) atom embeddings plus broadcast noise_cond (batch, 1, D).
         act = (
             nn.Dense(transformer_config.hidden_dim)(atom_inputs) + noise_cond[:, None, :]
         ) * mask_3d
@@ -217,6 +230,7 @@ class Denoiser(nn.Module):
         pair_biases = nn.Dense(transformer_config.num_layers * transformer_config.num_heads)(
             pair_hidden
         )
+        # (batch, num_layers, num_heads, num_atoms, num_atoms) per-layer attention logit biases.
         pair_biases = pair_biases.reshape(
             batch_size,
             num_atoms,
@@ -234,6 +248,7 @@ class Denoiser(nn.Module):
             )
 
         raw_output = nn.Dense(_SPATIAL_DIMS)(nn.LayerNorm()(act))
+        # (batch, num_atoms, 3) Karras skip + output combination with (batch, 1, 1) coefficients.
         denoised_positions = (
             factors.c_skip[:, None, None] * noisy_positions
             + factors.c_out[:, None, None] * raw_output

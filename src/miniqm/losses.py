@@ -78,7 +78,9 @@ def aligned_mse_loss(
     mask_f32 = atom_mask.astype(predicted_positions.dtype)
     atom_counts = jnp.maximum(jnp.sum(mask_f32, axis=-1), 1.0)
 
+    # (batch, num_atoms) squared Euclidean error per atom, zeroed on padded slots.
     sq_dist_per_atom = jnp.sum(jnp.square(predicted_positions - aligned_target), axis=-1) * mask_f32
+    # (batch,) mean squared coordinate error and RMSD per molecule.
     mse_per_mol = jnp.sum(sq_dist_per_atom, axis=-1) / atom_counts
     rmsd_per_mol = jnp.sqrt(mse_per_mol + _DIST_EPS)
 
@@ -110,12 +112,15 @@ def pairwise_distance_loss(
         Scalar mean squared distance error over valid local atom pairs.
     """
     _, num_atoms, _ = predicted_positions.shape
+    # (batch, num_atoms, num_atoms, 3) pairwise 3D coordinate differences x_i - x_j.
     pred_offsets = predicted_positions[:, :, None, :] - predicted_positions[:, None, :, :]
     target_offsets = target_positions[:, :, None, :] - target_positions[:, None, :, :]
 
+    # (batch, num_atoms, num_atoms) pairwise Euclidean distance matrices.
     pred_dists = jnp.sqrt(jnp.sum(jnp.square(pred_offsets), axis=-1) + _DIST_EPS)
     target_dists = jnp.sqrt(jnp.sum(jnp.square(target_offsets), axis=-1) + _DIST_EPS)
 
+    # (batch, num_atoms, num_atoms) mask for distinct valid atom pairs (i != j) within cutoff.
     valid_pairs = atom_mask[:, :, None] & atom_mask[:, None, :]
     not_self = ~jnp.eye(num_atoms, dtype=jnp.bool_)[None, :, :]
     within_cutoff = target_dists < cutoff

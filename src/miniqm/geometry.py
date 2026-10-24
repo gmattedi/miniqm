@@ -17,7 +17,9 @@ def _masked_centroid(
     atom_mask: jt.Bool[jax.Array, "*batch num_atoms"],
 ) -> jt.Float[jax.Array, "*batch 1 3"]:
     """Computes the masked mean coordinate across the atom axis."""
+    # (*batch, num_atoms, 1) float atom mask for coordinate broadcasting.
     mask = atom_mask[..., None].astype(positions.dtype)
+    # (*batch, 1, 1) valid atom count per molecule, clamped to >= 1.
     atom_count = jnp.maximum(mask.sum(axis=-2, keepdims=True), 1.0)
     return (positions * mask).sum(axis=-2, keepdims=True) / atom_count
 
@@ -66,6 +68,7 @@ def random_rotation(
         Rotated coordinates with padded atoms set to zero.
     """
     *batch_shape, _, _ = positions.shape
+    # (*batch, 2, 3) two random 3D vectors for Gram-Schmidt orthogonalization.
     basis = jax.random.normal(key, shape=(*batch_shape, 2, _SPATIAL_DIMS), dtype=positions.dtype)
     first_vec = basis[..., 0, :]
     second_vec = basis[..., 1, :]
@@ -74,8 +77,10 @@ def random_rotation(
     projection = jnp.sum(second_vec * axis_x, axis=-1, keepdims=True)
     axis_y = _normalize(second_vec - projection * axis_x)
     axis_z = jnp.cross(axis_x, axis_y)
+    # (*batch, 3, 3) proper rotation matrix with orthonormal rows (axis_x, axis_y, axis_z).
     rotation = jnp.stack((axis_x, axis_y, axis_z), axis=-2)
 
+    # (*batch, num_atoms, 3) coordinates rotated via x @ R^T.
     rotated = jnp.einsum(
         "...ni,...ji->...nj",
         positions,
@@ -106,6 +111,7 @@ def kabsch_align(
     Returns:
         Aligned target coordinates with padded atoms set to zero.
     """
+    # (*batch, num_atoms, 1) float atom mask for coordinate broadcasting.
     mask = atom_mask[..., None].astype(target.dtype)
     stopped_ref = jax.lax.stop_gradient(reference)
     stopped_target = jax.lax.stop_gradient(target)
@@ -116,6 +122,7 @@ def kabsch_align(
     centered_ref = (stopped_ref - ref_centroid) * mask
     centered_target = (stopped_target - target_centroid) * mask
 
+    # (*batch, 3, 3) cross-covariance matrix H = centered_target^T @ centered_ref.
     covariance = jnp.einsum(
         "...ni,...nj->...ij",
         centered_target,
@@ -124,10 +131,11 @@ def kabsch_align(
     )
     u_mat, _, vt_mat = jnp.linalg.svd(covariance, full_matrices=True)
 
-    # Flip the last singular vector when det(U @ V^T) < 0 to prevent improper reflections.
+    # (*batch, 3, 1) row-wise sign flip [1, 1, sign(det(U @ V^T))] on V^T to enforce det(R) = +1.
     det_sign = jnp.where(jnp.linalg.det(u_mat @ vt_mat) < 0.0, -1.0, 1.0)
     ones = jnp.ones_like(det_sign)
     reflection_fix = jnp.stack((ones, ones, det_sign), axis=-1)[..., :, None]
+    # (*batch, 3, 3) optimal proper rotation matrix R = U @ diag(1, 1, det_sign) @ V^T.
     rotation = jnp.matmul(
         u_mat,
         vt_mat * reflection_fix,

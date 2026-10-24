@@ -150,7 +150,9 @@ def make_noisy_sample(
     target_positions = geometry.random_rotation(rot_key, positions, atom_mask)
     sigma = sample_train_sigmas(sigma_key, batch_dims, config=config)
     gaussian_noise = jax.random.normal(noise_key, shape=positions.shape, dtype=positions.dtype)
+    # (*batch, num_atoms, 1) expanded valid-atom mask for 3D coordinates.
     mask_3d = atom_mask[..., None]
+    # (*batch, num_atoms, 3) broadcast per-molecule sigma (*batch, 1, 1) across atoms and xyz.
     noisy_positions = (target_positions + sigma[..., None, None] * gaussian_noise) * mask_3d
     return NoisySample(
         target_positions=target_positions,
