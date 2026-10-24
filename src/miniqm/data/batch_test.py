@@ -259,6 +259,20 @@ def test_collate_smiles_pads_graph_features() -> None:
     np.testing.assert_array_equal(smiles_batch.bond_features, expected_bond_features)
     np.testing.assert_array_equal(smiles_batch.atom_mask, expected_mask)
 
+    conformer_mol = batch.build_conformer_mol(
+        "F",
+        np.array(
+            [[0.0, 0.0, 0.0], [0.92, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32
+        ),
+    )
+    assert conformer_mol.GetNumAtoms() == 2
+    assert conformer_mol.GetNumConformers() == 1
+    assert conformer_mol.GetProp("SMILES") == "F"
+    np.testing.assert_allclose(
+        conformer_mol.GetConformer().GetPositions(),
+        np.array([[0.0, 0.0, 0.0], [0.92, 0.0, 0.0]], dtype=np.float64),
+    )
+
 
 def test_collate_batch_validates_preconditions() -> None:
     with pytest.raises(ValueError, match="Expected non-empty sequence"):

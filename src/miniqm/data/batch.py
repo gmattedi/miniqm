@@ -387,6 +387,38 @@ def collate_smiles(
     return _pad_graph_features(graphs, max_atoms=max_atoms)
 
 
+@jt.typed
+def build_conformer_mol(
+    smiles: str,
+    positions: jt.Float[np.ndarray, "max_atoms 3"],
+) -> Chem.Mol:
+    """Builds an explicit-hydrogen RDKit molecule with a 3D conformer from padded coordinates.
+
+    Args:
+        smiles: Input SMILES string defining the molecular graph.
+        positions: Padded 3D coordinates in Angstroms ordered by explicit-hydrogen SMILES atoms.
+
+    Returns:
+        RDKit molecule with explicit hydrogens and a single 3D conformer attached.
+    """
+    base_mol = _mol_from_smiles(smiles)
+    if base_mol is None:
+        raise ValueError(f"Failed to parse SMILES {smiles!r}.")
+    mol_with_hs = Chem.AddHs(base_mol)
+    num_atoms = mol_with_hs.GetNumAtoms()
+    max_atoms, _ = positions.shape
+    if num_atoms > max_atoms:
+        raise ValueError(f"Molecule {smiles!r} has {num_atoms} atoms, exceeding {max_atoms=}.")
+    conformer = Chem.Conformer(num_atoms)
+    for atom_idx in range(num_atoms):
+        pos = positions[atom_idx]
+        conformer.SetAtomPosition(atom_idx, (float(pos[0]), float(pos[1]), float(pos[2])))
+    mol_with_hs.AddConformer(conformer, assignId=True)
+    mol_with_hs.SetProp("_Name", smiles)
+    mol_with_hs.SetProp("SMILES", smiles)
+    return mol_with_hs
+
+
 def collate_batch(
     molecules: Sequence[schema.Molecule],
     *,

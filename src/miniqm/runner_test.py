@@ -113,7 +113,7 @@ def test_main_cli_writes_tensorboard_events_checkpoints_and_metrics(
     )
     assert (run_dir / "test_metrics.json").is_file()
 
-    xyz_path = tmp_path / "sampled.xyz"
+    sdf_path = tmp_path / "sampled.sdf"
     runner.sample_main(
         (
             "--run-dir",
@@ -123,12 +123,12 @@ def test_main_cli_writes_tensorboard_events_checkpoints_and_metrics(
             "O",
             "--num-sampling-steps",
             "2",
-            "--output-xyz",
-            str(xyz_path),
+            "--output-sdf",
+            str(sdf_path),
         )
     )
-    assert xyz_path.is_file()
-    assert xyz_path.read_text(encoding="utf-8").startswith("2\nF\n")
+    assert sdf_path.is_file()
+    assert "$$$$" in sdf_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

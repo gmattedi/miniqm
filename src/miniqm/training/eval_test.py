@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from rdkit import Chem
 
 from miniqm.data import data_source, schema
 from miniqm.diffusion import losses, model, sampling
@@ -132,18 +133,22 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
 
     smiles_file = tmp_path / "molecules.smi"
     smiles_file.write_text("F\nO\n", encoding="utf-8")
-    output_xyz = tmp_path / "out.xyz"
-    xyz_content = eval_lib.run_smiles_sampling(
+    output_sdf = tmp_path / "out.sdf"
+    mols = eval_lib.run_smiles_sampling(
         eval_lib.SampleSmilesConfig(
             run_dir=run_dir,
             smiles_file=smiles_file,
             num_sampling_steps=2,
-            output_xyz=output_xyz,
+            output_sdf=output_sdf,
         )
     )
-    assert output_xyz.is_file()
-    assert xyz_content.startswith("2\nF\n")
-    assert "\n3\nO\n" in xyz_content
+    assert len(mols) == 2
+    assert output_sdf.is_file()
+    supplier = Chem.SDMolSupplier(str(output_sdf), removeHs=False)
+    loaded_mols = tuple(supplier)
+    assert len(loaded_mols) == 2
+    assert loaded_mols[0].GetNumAtoms() == 2
+    assert loaded_mols[1].GetNumAtoms() == 3
 
 
 def test_eval_and_sample_configs_reject_invalid_values() -> None:

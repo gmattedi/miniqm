@@ -35,7 +35,7 @@ def eval_main(argv: Sequence[str] | None = None) -> None:
 
 
 def sample_main(argv: Sequence[str] | None = None) -> None:
-    """Parses SMILES inference CLI arguments via tyro and writes sampled XYZ conformers."""
+    """Parses SMILES inference CLI arguments via tyro and writes sampled SDF conformers."""
     _configure_logging()
     config = tyro.cli(eval_lib.SampleSmilesConfig, args=argv)
     eval_lib.run_smiles_sampling(config)

@@ -11,10 +11,10 @@ from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 import numpy as np
+from rdkit import Chem
 from rich import progress
 
 from miniqm import jaxtypes as jt
-from miniqm import viz
 from miniqm.data import batch as batch_lib
 from miniqm.data import data_source
 from miniqm.diffusion import geometry
@@ -101,7 +101,7 @@ class SampleSmilesConfig:
     checkpoint_name: str = "best.msgpack"
     use_ema: bool = True
     num_sampling_steps: int | None = None
-    output_xyz: pathlib.Path = pathlib.Path("sampled_conformers.xyz")
+    output_sdf: pathlib.Path = pathlib.Path("sampled_conformers.sdf")
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -466,14 +466,14 @@ def _resolve_smiles_inputs(config: SampleSmilesConfig) -> tuple[str, ...]:
     return config.smiles
 
 
-def run_smiles_sampling(config: SampleSmilesConfig) -> str:
-    """Generates 3D conformers for a list of SMILES strings and writes them to an XYZ file.
+def run_smiles_sampling(config: SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
+    """Generates 3D conformers for a list of SMILES strings and writes them to an SDF file.
 
     Args:
         config: SMILES inference configuration.
 
     Returns:
-        Concatenated multi-molecule XYZ coordinate string.
+        RDKit molecules populated with the sampled 3D conformers.
     """
     smiles_seq = _resolve_smiles_inputs(config)
     loaded = checkpoint.load_run_checkpoint(
@@ -500,22 +500,18 @@ def run_smiles_sampling(config: SampleSmilesConfig) -> str:
         dtype=np.float32,
     )
 
-    xyz_blocks = tuple(
-        viz.format_xyz_block(
-            generated[mol_idx],
-            host_batch.atom_features[mol_idx],
-            host_batch.atom_mask[mol_idx],
-            comment=smiles,
-        )
+    conformer_mols = tuple(
+        batch_lib.build_conformer_mol(smiles, generated[mol_idx])
         for mol_idx, smiles in enumerate(smiles_seq)
     )
-    xyz_content = "".join(xyz_blocks)
-    config.output_xyz.parent.mkdir(parents=True, exist_ok=True)
-    config.output_xyz.write_text(xyz_content, encoding="utf-8")
+    config.output_sdf.parent.mkdir(parents=True, exist_ok=True)
+    with Chem.SDWriter(str(config.output_sdf)) as writer:
+        for mol in conformer_mols:
+            writer.write(mol)
     _LOGGER.info(
         "Generated %d conformer(s) from checkpoint step=%d and wrote %s",
         len(smiles_seq),
         loaded.checkpoint.step,
-        config.output_xyz,
+        config.output_sdf,
     )
-    return xyz_content
+    return conformer_mols
