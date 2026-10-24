@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from rich import progress
 import tensorboardX
 
 from miniqm import jaxtypes as jt
@@ -28,6 +29,8 @@ from miniqm.training import eval as eval_lib
 
 _LOGGER: Final = logging.getLogger(__name__)
 _SPATIAL_DIMS: Final = 3
+_BYTES_PER_MB: Final = 1024 * 1024
+_TABULATE_WIDTH: Final = 100
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -327,6 +330,71 @@ def eval_step(
     )
 
 
+def count_parameters(params: flax_typing.VariableDict) -> int:
+    """Returns the total number of scalar parameters in a variable dictionary."""
+    return sum(int(leaf.size) for leaf in jax.tree.leaves(params))
+
+
+def format_parameter_summary(params: flax_typing.VariableDict) -> str:
+    """Formats a top-level submodule parameter count and memory breakdown.
+
+    Args:
+        params: Initialized Flax variable dictionary.
+
+    Returns:
+        Single-line summary of parameter counts per top-level submodule and total size.
+    """
+    root = params.get("params", params)
+    module_parts = tuple(f"{name}: {count_parameters(subtree):,}" for name, subtree in root.items())
+    total_params = count_parameters(params)
+    total_mb = sum(int(leaf.nbytes) for leaf in jax.tree.leaves(params)) / _BYTES_PER_MB
+    return f"{', '.join(module_parts)} | total: {total_params:,} ({total_mb:.2f} MB)"
+
+
+@jt.typed
+def tabulate_model(
+    dummy_batch: batch_lib.JaxBatch,
+    *,
+    config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
+    depth: int = 1,
+) -> str:
+    """Renders a Flax Linen module summary table for the denoiser.
+
+    Args:
+        dummy_batch: Sample padded JAX batch providing input feature shapes.
+        config: Denoiser architecture configuration.
+        depth: Submodule tree depth to display in the summary table.
+
+    Returns:
+        Formatted table summarizing module inputs, outputs, and parameter counts.
+    """
+    batch_size, num_atoms = dummy_batch.atom_mask.shape
+    dummy_positions = jnp.zeros((batch_size, num_atoms, _SPATIAL_DIMS), dtype=jnp.float32)
+    dummy_sigma = jnp.ones((batch_size,), dtype=jnp.float32)
+    denoiser = model_lib.Denoiser(config=config)
+    with jt.disable_typechecking():
+        return denoiser.tabulate(
+            jax.random.key(0),
+            dummy_positions,
+            dummy_sigma,
+            batch=dummy_batch,
+            depth=depth,
+            console_kwargs={"width": _TABULATE_WIDTH, "force_terminal": False},
+        )
+
+
+@functools.partial(jax.jit, static_argnames=("config",))
+@jt.typed
+def _jit_train_step(
+    state: TrainState,
+    batch: batch_lib.JaxBatch,
+    *,
+    config: TrainConfig = DEFAULT_TRAIN_CONFIG,
+) -> TrainStepOutput:
+    """Executes one compiled diffusion training step."""
+    return train_step(state, batch, config=config)
+
+
 def _infinite_train_batches(
     train_source: data_source.DataSource,
     *,
@@ -364,6 +432,32 @@ def _write_scalars(
         handle.write(json.dumps(record) + "\n")
 
 
+def _write_run_config(config: RunConfig) -> None:
+    """Writes the serialized run configuration to the run directory."""
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    (config.run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    config_dict = dataclasses.asdict(config)
+    for path_key in ("train_path", "val_path", "run_dir"):
+        config_dict[path_key] = str(config_dict[path_key])
+    (config.run_dir / "config.json").write_text(
+        json.dumps(config_dict, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _make_progress() -> progress.Progress:
+    """Constructs the Rich progress bar for the training step loop."""
+    return progress.Progress(
+        progress.SpinnerColumn(),
+        progress.TextColumn("[bold blue]{task.description}"),
+        progress.BarColumn(),
+        progress.MofNCompleteColumn(),
+        progress.TimeElapsedColumn(),
+        progress.TimeRemainingColumn(),
+        progress.TextColumn("{task.fields[metrics]}"),
+    )
+
+
 def run_training(config: RunConfig) -> TrainState:
     """Executes the full training, validation, sampling, and checkpointing loop.
 
@@ -373,17 +467,16 @@ def run_training(config: RunConfig) -> TrainState:
     Returns:
         Final training state after all configured optimization steps.
     """
-    config.run_dir.mkdir(parents=True, exist_ok=True)
+    _write_run_config(config)
     checkpoints_dir = config.run_dir / "checkpoints"
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = config.run_dir / "metrics.jsonl"
 
-    config_dict = dataclasses.asdict(config)
-    for path_key in ("train_path", "val_path", "run_dir"):
-        config_dict[path_key] = str(config_dict[path_key])
-    (config.run_dir / "config.json").write_text(
-        json.dumps(config_dict, indent=2) + "\n",
-        encoding="utf-8",
+    devices = jax.devices()
+    _LOGGER.info(
+        "Running on %d %s device(s): %s",
+        len(devices),
+        jax.default_backend(),
+        ", ".join(str(device) for device in devices),
     )
 
     train_source = data_source.DataSource(
@@ -410,16 +503,28 @@ def run_training(config: RunConfig) -> TrainState:
 
     init_rng, eval_rng, sample_rng = jax.random.split(jax.random.key(config.seed), 3)
     state = init_train_state(init_rng, first_batch, config=config.train)
-    jit_train_step = jax.jit(functools.partial(train_step, config=config.train))
+    _LOGGER.info("Parameter summary: %s", format_parameter_summary(state.params))
+    _LOGGER.info(
+        "Model architecture:\n%s",
+        tabulate_model(first_batch, config=config.train.model),
+    )
 
     best_val_loss = float("inf")
     start_time = time.monotonic()
 
-    with tensorboardX.SummaryWriter(logdir=str(config.run_dir)) as writer:
+    with (
+        tensorboardX.SummaryWriter(logdir=str(config.run_dir)) as writer,
+        _make_progress() as progress_bar,
+    ):
+        task_id = progress_bar.add_task("Training", total=config.num_steps, metrics="")
         current_batch = first_batch
         for step_idx in range(1, config.num_steps + 1):
-            step_out = cast("TrainStepOutput", jit_train_step(state, current_batch))
+            step_out = cast(
+                "TrainStepOutput",
+                _jit_train_step(state, current_batch, config=config.train),
+            )
             state = step_out.state
+            progress_bar.advance(task_id)
 
             if step_idx % config.log_every == 0 or step_idx in {1, config.num_steps}:
                 elapsed_s = time.monotonic() - start_time
@@ -438,6 +543,14 @@ def run_training(config: RunConfig) -> TrainState:
                     step=step_idx,
                     split="train",
                     scalars=train_scalars,
+                )
+                progress_bar.update(
+                    task_id,
+                    metrics=(
+                        f"loss={train_scalars['total_loss']:.4f} "
+                        f"rmsd={train_scalars['rmsd']:.3f}A "
+                        f"lr={train_scalars['learning_rate']:.2e}"
+                    ),
                 )
                 _LOGGER.info(
                     "step=%d/%d train_loss=%.4f rmsd=%.3f A grad_norm=%.2f lr=%.2e",

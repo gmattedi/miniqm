@@ -62,6 +62,27 @@ def test_init_train_state_creates_matching_params_and_ema() -> None:
         np.testing.assert_array_equal(param_leaf, ema_leaf)
 
 
+def test_parameter_summary_and_tabulate_report_named_submodules() -> None:
+    synthetic_batch = _make_synthetic_batch()
+    state = train.init_train_state(
+        jax.random.key(1),
+        synthetic_batch,
+        config=_TEST_TRAIN_CONFIG,
+    )
+    total_params = train.count_parameters(state.params)
+    summary = train.format_parameter_summary(state.params)
+    table = train.tabulate_model(synthetic_batch, config=_TEST_TRAIN_CONFIG.model)
+
+    assert total_params > 0
+    assert f"total: {total_params:,}" in summary
+    assert "atom_proj:" in summary
+    assert "block_0:" in summary
+    assert "coord_head:" in summary
+    assert "Denoiser Summary" in table
+    assert "block_0" in table
+    assert "coord_head" in table
+
+
 def test_train_step_updates_parameters_and_ema_weights() -> None:
     synthetic_batch = _make_synthetic_batch()
     initial_state = train.init_train_state(
