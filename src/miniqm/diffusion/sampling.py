@@ -8,10 +8,10 @@ from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 
-from miniqm import batch as batch_lib
-from miniqm import geometry, model
 from miniqm import jaxtypes as jt
-from miniqm import noise as noise_lib
+from miniqm.data import batch as batch_lib
+from miniqm.diffusion import geometry, model
+from miniqm.diffusion import noise as noise_lib
 
 _LOGGER: Final = logging.getLogger(__name__)
 _SPATIAL_DIMS: Final = 3
@@ -101,14 +101,13 @@ def sample_trajectory(
 
     Args:
         key: JAX PRNG key.
-        denoiser: Configured Denoiser Linen module.
+        denoiser: Configured denoiser module.
         params: Initialized model parameters.
         batch: Padded molecular graph features and valid-atom mask.
         config: Reverse integration and stochastic churn parameters.
 
     Returns:
-        Coordinate trajectory of shape `(num_steps + 1, batch, num_atoms, 3)` from
-        initial noise (index 0) to final denoised coordinates (index -1).
+        Coordinate trajectory from initial noise (index 0) to final denoised coordinates (index -1).
     """
     _LOGGER.info(
         "Sampling 3D coordinate trajectory over %d steps (gamma_0=%.2f, step_scale=%.2f).",
@@ -169,7 +168,7 @@ def sample_coordinates(
 
     Args:
         key: JAX PRNG key.
-        denoiser: Configured Denoiser Linen module.
+        denoiser: Configured denoiser module.
         params: Initialized model parameters.
         batch: Padded molecular graph features and valid-atom mask.
         config: Reverse integration and stochastic churn parameters.

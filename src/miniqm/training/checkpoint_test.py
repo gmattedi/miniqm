@@ -5,8 +5,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from miniqm import batch as batch_lib
-from miniqm import checkpoint, model, train
+from miniqm.data import batch as batch_lib
+from miniqm.diffusion import model
+from miniqm.training import checkpoint, train
 
 _TINY_TRAIN_CONFIG: Final = train.TrainConfig(
     model=model.DenoiserConfig(

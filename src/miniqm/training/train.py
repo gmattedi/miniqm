@@ -16,14 +16,15 @@ import numpy as np
 import optax
 import tensorboardX
 
-from miniqm import batch as batch_lib
-from miniqm import checkpoint, data_source
-from miniqm import eval as eval_lib
 from miniqm import jaxtypes as jt
-from miniqm import losses as losses_lib
-from miniqm import model as model_lib
-from miniqm import noise as noise_lib
-from miniqm import sampling as sampling_lib
+from miniqm.data import batch as batch_lib
+from miniqm.data import data_source
+from miniqm.diffusion import losses as losses_lib
+from miniqm.diffusion import model as model_lib
+from miniqm.diffusion import noise as noise_lib
+from miniqm.diffusion import sampling as sampling_lib
+from miniqm.training import checkpoint
+from miniqm.training import eval as eval_lib
 
 _LOGGER: Final = logging.getLogger(__name__)
 _SPATIAL_DIMS: Final = 3
@@ -37,7 +38,7 @@ class TrainConfig:
         model: Denoiser architecture and EDM noise schedule configuration.
         loss: Diffusion loss weights and distance cutoff configuration.
         learning_rate: Peak learning rate after linear warmup.
-        warmup_steps: Number of linear warmup steps from 0.0 to `learning_rate`.
+        warmup_steps: Number of linear warmup steps from zero to peak learning rate.
         decay_steps: Total steps for the warmup + cosine decay schedule.
         min_learning_rate: Terminal learning rate at the end of cosine decay.
         weight_decay: AdamW decoupled weight decay coefficient.
@@ -205,7 +206,7 @@ def init_train_state(
         config: Training hyperparameter configuration.
 
     Returns:
-        Initial `TrainState` at step 0 with `ema_params` equal to `params`.
+        Initial training state at step 0 with EMA weights equal to active weights.
     """
     init_rng, state_rng = jax.random.split(rng)
     batch_size, num_atoms = dummy_batch.atom_mask.shape
@@ -240,12 +241,12 @@ def train_step(
     """Executes one forward/backward diffusion training step and updates parameters and EMA.
 
     Args:
-        state: Current `TrainState`.
-        batch: Padded JAX batch with ground-truth 3D `positions` and molecular graph features.
+        state: Current training state.
+        batch: Padded JAX batch with ground-truth 3D coordinates and molecular graph features.
         config: Training hyperparameter configuration.
 
     Returns:
-        Updated `TrainState`, loss breakdown, unclipped gradient norm, and current learning rate.
+        Updated training state, loss breakdown, unclipped gradient norm, and current learning rate.
     """
     step_rng, next_rng = jax.random.split(state.rng)
     noisy_sample = noise_lib.make_noisy_sample(
@@ -309,9 +310,9 @@ def eval_step(
     """Evaluates the diffusion loss on a batch without updating parameters.
 
     Args:
-        params: Model parameters (typically `state.ema_params`).
+        params: Model parameters (typically EMA weights).
         rng: PRNG key for random 3D rotation augmentation and noise sampling.
-        batch: Padded JAX batch with ground-truth 3D `positions` and molecular graph features.
+        batch: Padded JAX batch with ground-truth 3D coordinates and molecular graph features.
         config: Training hyperparameter configuration.
 
     Returns:
@@ -354,7 +355,7 @@ def _write_scalars(
     split: str,
     scalars: Mapping[str, float],
 ) -> None:
-    """Logs scalar metrics to both TensorBoardX and `metrics.jsonl`."""
+    """Logs scalar metrics to both TensorBoardX and the JSONL metrics file."""
     for name, value in scalars.items():
         writer.add_scalar(f"{split}/{name}", value, global_step=step)
     writer.flush()
@@ -370,7 +371,7 @@ def run_training(config: RunConfig) -> TrainState:
         config: End-to-end training and evaluation configuration.
 
     Returns:
-        Final `TrainState` after `config.num_steps` optimization steps.
+        Final training state after all configured optimization steps.
     """
     config.run_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir = config.run_dir / "checkpoints"

@@ -7,8 +7,8 @@ from typing import Final
 import jax
 import jax.numpy as jnp
 
-from miniqm import geometry
 from miniqm import jaxtypes as jt
+from miniqm.diffusion import geometry
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

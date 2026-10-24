@@ -18,10 +18,10 @@ class Checkpoint:
 
 
 def save_checkpoint(path: pathlib.Path, ckpt: Checkpoint) -> None:
-    """Serializes step, active `params`, and `ema_params` to a MessagePack file.
+    """Serializes step count, active weights, and EMA weights to a MessagePack file.
 
     Args:
-        path: Destination `.msgpack` file path.
+        path: Destination MessagePack file path.
         ckpt: Checkpoint payload to persist.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,14 +36,14 @@ def save_checkpoint(path: pathlib.Path, ckpt: Checkpoint) -> None:
 
 
 def load_checkpoint(path: pathlib.Path, template: Checkpoint) -> Checkpoint:
-    """Restores step, `params`, and `ema_params` from a MessagePack file.
+    """Restores step count, active weights, and EMA weights from a MessagePack file.
 
     Args:
-        path: Source `.msgpack` file path.
-        template: Template `Checkpoint` providing the expected parameter PyTree structure.
+        path: Source MessagePack file path.
+        template: Template checkpoint providing the expected parameter PyTree structure.
 
     Returns:
-        Restored `Checkpoint` with `step`, `params`, and `ema_params`.
+        Restored checkpoint with step count, active weights, and EMA weights.
     """
     template_dict = {
         "step": template.step,

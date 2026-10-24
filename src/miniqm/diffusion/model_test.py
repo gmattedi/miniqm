@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from miniqm import batch as batch_lib
-from miniqm import geometry, model
 from miniqm import jaxtypes as jt
+from miniqm.data import batch as batch_lib
+from miniqm.diffusion import geometry, model
 
 _TEST_CONFIG: Final = model.DenoiserConfig(
     transformer=model.TransformerConfig(hidden_dim=32, num_layers=2, num_heads=4),
@@ -19,7 +19,7 @@ _TEST_CONFIG: Final = model.DenoiserConfig(
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _ModelTestInputs:
-    """Synthetic 2-molecule padded batch for Denoiser tests."""
+    """Synthetic 2-molecule padded batch for denoiser tests."""
 
     noisy_positions: jt.Float[jt.Array, "batch num_atoms 3"]
     sigma: jt.Float[jt.Array, " batch"]

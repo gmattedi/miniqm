@@ -7,9 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from miniqm import batch as batch_lib
-from miniqm import geometry, model, noise, train
 from miniqm import jaxtypes as jt
+from miniqm.data import batch as batch_lib
+from miniqm.diffusion import geometry, model, noise
+from miniqm.training import train
 
 _TEST_TRAIN_CONFIG: Final = train.TrainConfig(
     model=model.DenoiserConfig(

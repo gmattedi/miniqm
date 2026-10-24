@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from miniqm import jaxtypes as jt
-from miniqm import schema
+from miniqm.data import schema
 
 
 def _make_sample_row() -> dict[str, object]:

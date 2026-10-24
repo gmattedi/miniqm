@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from miniqm import geometry, losses
 from miniqm import jaxtypes as jt
+from miniqm.diffusion import geometry, losses
 
 
 @jt.typed

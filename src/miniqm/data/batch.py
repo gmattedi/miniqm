@@ -11,7 +11,7 @@ from rdkit import Chem
 from rdkit.Chem import rdDetermineBonds
 
 from miniqm import jaxtypes as jt
-from miniqm import schema
+from miniqm.data import schema
 
 MAX_ATOMS: Final = 29
 _SPATIAL_DIMS: Final = 3
@@ -328,14 +328,14 @@ def collate_batch(
     *,
     max_atoms: int = MAX_ATOMS,
 ) -> Batch:
-    """Featurizes and pads a sequence of molecules into a fixed-shape Batch.
+    """Featurizes and pads a sequence of molecules into a fixed-shape batch.
 
     Args:
         molecules: Non-empty sequence of unpadded QM9 molecules.
         max_atoms: Padded atom dimension.
 
     Returns:
-        Padded Batch with zero-centered coordinates and boolean atom mask.
+        Padded batch with zero-centered coordinates and boolean atom mask.
     """
     if not molecules:
         raise ValueError("Expected non-empty sequence of molecules to collate.")

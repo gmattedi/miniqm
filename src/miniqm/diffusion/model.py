@@ -8,10 +8,10 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 
-from miniqm import batch as batch_lib
-from miniqm import geometry
 from miniqm import jaxtypes as jt
-from miniqm import noise as noise_lib
+from miniqm.data import batch as batch_lib
+from miniqm.diffusion import geometry
+from miniqm.diffusion import noise as noise_lib
 
 _LOGGER: Final = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class FourierNoiseConfig:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class DenoiserConfig:
-    """Complete configuration for the 3D molecular coordinate Denoiser."""
+    """Complete configuration for the 3D molecular coordinate denoiser."""
 
     transformer: TransformerConfig = dataclasses.field(default_factory=TransformerConfig)
     fourier: FourierNoiseConfig = dataclasses.field(default_factory=FourierNoiseConfig)

@@ -6,8 +6,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from miniqm import data_source, losses, model, sampling, schema, train
-from miniqm import eval as eval_lib
+from miniqm.data import data_source, schema
+from miniqm.diffusion import losses, model, sampling
+from miniqm.training import eval as eval_lib
+from miniqm.training import train
 
 _TINY_MODEL_CONFIG: Final = model.DenoiserConfig(
     transformer=model.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),

@@ -4,7 +4,7 @@ import jax
 import numpy as np
 import pytest
 
-from miniqm import batch, schema
+from miniqm.data import batch, schema
 
 
 def _make_labels() -> schema.QM9Labels:

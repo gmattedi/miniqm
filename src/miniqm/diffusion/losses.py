@@ -6,9 +6,9 @@ from typing import Final
 import jax
 import jax.numpy as jnp
 
-from miniqm import geometry
 from miniqm import jaxtypes as jt
-from miniqm import noise as noise_lib
+from miniqm.diffusion import geometry
+from miniqm.diffusion import noise as noise_lib
 
 # Prevents infinite gradient of sqrt(r^2) at zero interatomic distance or zero RMSD.
 _DIST_EPS: Final = 1e-8

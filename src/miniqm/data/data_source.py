@@ -7,7 +7,7 @@ from typing import Final
 
 import numpy as np
 
-from miniqm import batch, schema
+from miniqm.data import batch, schema
 
 _LOGGER: Final = logging.getLogger(__name__)
 
@@ -47,10 +47,10 @@ class DataSource:
         Args:
             batch_size: Number of molecules per batch.
             rng: Optional NumPy random generator for shuffling indices before batching.
-            drop_last: Whether to drop the trailing batch if smaller than batch_size.
+            drop_last: Whether to drop the trailing batch if smaller than the target batch size.
 
         Yields:
-            Sliced Batch instances.
+            Sliced batches.
         """
         if batch_size <= 0:
             raise ValueError(f"Expected positive batch_size, got {batch_size}.")

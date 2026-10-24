@@ -6,11 +6,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from miniqm import runner, schema, train
+from miniqm import runner
+from miniqm.data import schema
+from miniqm.training import train
 
 
 def _write_split_parquet(path: pathlib.Path, num_rows: int = 4) -> pathlib.Path:
-    """Writes a synthetic QM9 Parquet file with `num_rows` 2-atom HF molecules."""
+    """Writes a synthetic QM9 Parquet file with 2-atom HF molecules."""
     charges = (9, 1, *(0,) * 27)
     positions = ((0.0, 0.0, 0.0), (0.92, 0.0, 0.0), *((0.0, 0.0, 0.0),) * 27)
     mulliken = (-0.4, 0.4, *(0.0,) * 27)

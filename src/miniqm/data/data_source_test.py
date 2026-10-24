@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from miniqm import batch, data_source, schema
+from miniqm.data import batch, data_source, schema
 
 
 def _make_sample_row(*, index: int, mu: float) -> dict[str, object]:

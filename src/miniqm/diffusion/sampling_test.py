@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from miniqm import batch as batch_lib
-from miniqm import geometry, model, noise, sampling
 from miniqm import jaxtypes as jt
+from miniqm.data import batch as batch_lib
+from miniqm.diffusion import geometry, model, noise, sampling
 
 _TEST_DENOISER_CONFIG: Final = model.DenoiserConfig(
     transformer=model.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
@@ -19,7 +19,7 @@ _TEST_DENOISER_CONFIG: Final = model.DenoiserConfig(
 @jt.typed
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _SamplerTestSetup:
-    """Synthetic 2-molecule graph batch and initialized Denoiser for sampler tests."""
+    """Synthetic 2-molecule graph batch and initialized denoiser for sampler tests."""
 
     denoiser: model.Denoiser
     params: flax_typing.VariableDict
@@ -28,7 +28,7 @@ class _SamplerTestSetup:
 
 @jt.typed
 def _make_test_setup() -> _SamplerTestSetup:
-    """Creates a 2-molecule synthetic graph batch and initialized Denoiser parameters."""
+    """Creates a 2-molecule synthetic graph batch and initialized denoiser parameters."""
     atom_key, bond_key, init_key = jax.random.split(jax.random.key(0), 3)
     graph_batch = batch_lib.JaxBatch(
         atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),

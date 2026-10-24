@@ -9,13 +9,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from miniqm import batch as batch_lib
-from miniqm import data_source, geometry
 from miniqm import jaxtypes as jt
-from miniqm import losses as losses_lib
-from miniqm import model as model_lib
-from miniqm import noise as noise_lib
-from miniqm import sampling as sampling_lib
+from miniqm.data import batch as batch_lib
+from miniqm.data import data_source
+from miniqm.diffusion import geometry
+from miniqm.diffusion import losses as losses_lib
+from miniqm.diffusion import model as model_lib
+from miniqm.diffusion import noise as noise_lib
+from miniqm.diffusion import sampling as sampling_lib
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -77,9 +78,9 @@ def eval_step(
     """Evaluates the diffusion loss on a batch without updating parameters.
 
     Args:
-        params: Model parameters (typically `state.ema_params`).
+        params: Model parameters (typically EMA weights).
         rng: PRNG key for random 3D rotation augmentation and noise sampling.
-        batch: Padded JAX batch with ground-truth 3D `positions` and molecular graph features.
+        batch: Padded JAX batch with ground-truth 3D coordinates and molecular graph features.
         model_config: Denoiser architecture and noise schedule configuration.
         loss_config: Diffusion loss weights and distance cutoff configuration.
 
@@ -114,9 +115,9 @@ def evaluate_loss(
     """Computes mean teacher-forced diffusion loss and RMSD across validation batches.
 
     Args:
-        params: Model parameters to evaluate (typically `state.ema_params`).
+        params: Model parameters to evaluate (typically EMA weights).
         rng: PRNG key for validation rotation augmentation and noise sampling.
-        val_source: Validation `DataSource`.
+        val_source: Validation data source.
         batch_size: Validation batch size.
         model_config: Denoiser architecture and noise schedule configuration.
         loss_config: Diffusion loss weights and distance cutoff configuration.
@@ -164,9 +165,9 @@ def evaluate_sampling_rmsd(
     """Generates 3D conformers from Gaussian noise and computes Kabsch-aligned RMSD.
 
     Args:
-        params: Model parameters to evaluate (typically `state.ema_params`).
+        params: Model parameters to evaluate (typically EMA weights).
         rng: PRNG key for reverse-diffusion sampling.
-        val_batch: Padded JAX validation batch containing target `positions`.
+        val_batch: Padded JAX validation batch containing target coordinates.
         model_config: Denoiser architecture configuration.
         sampling_config: Reverse Euler integration configuration.
 

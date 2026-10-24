@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from miniqm import noise
+from miniqm.diffusion import noise
 
 _DEFAULT_CONFIG: Final = noise.DEFAULT_NOISE_CONFIG
 

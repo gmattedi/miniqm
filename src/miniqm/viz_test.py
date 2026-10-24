@@ -1,7 +1,8 @@
 import numpy as np
 import py3Dmol
 
-from miniqm import batch, viz
+from miniqm import viz
+from miniqm.data import batch
 
 
 def test_format_xyz_block_and_trajectory_exclude_padded_atoms() -> None:

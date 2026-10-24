@@ -23,7 +23,7 @@ def atom_symbols_from_features(
         atom_mask: Boolean mask indicating valid atoms.
 
     Returns:
-        Tuple of atomic element symbols (`"H"`, `"C"`, `"N"`, `"O"`, `"F"`) for valid atoms.
+        Tuple of atomic element symbols (H, C, N, O, F) for valid atoms.
     """
     valid_element_one_hot = atom_features[atom_mask, :_NUM_ELEMENTS]
     element_indices = np.argmax(valid_element_one_hot, axis=-1)
@@ -41,7 +41,7 @@ def format_xyz_block(
     """Formats a single molecule's valid atoms into an XYZ coordinate block.
 
     Args:
-        positions: Padded 3D coordinates `(num_atoms, 3)` in Angstroms.
+        positions: Padded 3D coordinates in Angstroms.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Boolean mask indicating valid atoms.
         comment: Optional header comment line.
@@ -68,12 +68,12 @@ def format_xyz_trajectory(
     """Formats a sequence of 3D coordinate frames into a multi-frame XYZ string.
 
     Args:
-        trajectory: Padded 3D coordinate frames `(num_frames, num_atoms, 3)`.
+        trajectory: Padded 3D coordinate frames.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Boolean mask indicating valid atoms.
 
     Returns:
-        Concatenated multi-frame XYZ string suitable for `py3Dmol.view.addModelsAsFrames`.
+        Concatenated multi-frame XYZ string.
     """
     blocks = tuple(
         format_xyz_block(
@@ -99,14 +99,14 @@ def show_molecule(
     """Creates an interactive 3D ball-and-stick viewer for a single molecule.
 
     Args:
-        positions: Padded 3D coordinates `(num_atoms, 3)`.
+        positions: Padded 3D coordinates.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Boolean mask indicating valid atoms.
         width: Viewer width in pixels.
         height: Viewer height in pixels.
 
     Returns:
-        Configured `py3Dmol.view` instance.
+        Configured 3D viewer instance.
     """
     xyz_block = format_xyz_block(positions, atom_features, atom_mask)
     viewer = py3Dmol.view(width=width, height=height)
@@ -129,15 +129,15 @@ def show_overlay(
     """Creates a 3D viewer overlaying reference (translucent) and candidate (cyan) conformers.
 
     Args:
-        reference_positions: Ground-truth padded 3D coordinates `(num_atoms, 3)`.
-        candidate_positions: Predicted/aligned padded 3D coordinates `(num_atoms, 3)`.
+        reference_positions: Ground-truth padded 3D coordinates.
+        candidate_positions: Predicted/aligned padded 3D coordinates.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Boolean mask indicating valid atoms.
         width: Viewer width in pixels.
         height: Viewer height in pixels.
 
     Returns:
-        Configured `py3Dmol.view` instance containing both models.
+        Configured 3D viewer instance containing both models.
     """
     ref_xyz = format_xyz_block(reference_positions, atom_features, atom_mask, comment="reference")
     cand_xyz = format_xyz_block(candidate_positions, atom_features, atom_mask, comment="candidate")
@@ -176,7 +176,7 @@ def show_trajectory(
     """Creates an animated 3D viewer for a multi-frame diffusion coordinate trajectory.
 
     Args:
-        trajectory: Padded 3D coordinate frames `(num_frames, num_atoms, 3)`.
+        trajectory: Padded 3D coordinate frames.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Boolean mask indicating valid atoms.
         interval_ms: Delay between animation frames in milliseconds.
@@ -184,7 +184,7 @@ def show_trajectory(
         height: Viewer height in pixels.
 
     Returns:
-        Configured `py3Dmol.view` instance with loop animation enabled.
+        Configured 3D viewer instance with loop animation enabled.
     """
     xyz_traj = format_xyz_trajectory(trajectory, atom_features, atom_mask)
     viewer = py3Dmol.view(width=width, height=height)

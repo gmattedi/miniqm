@@ -5,11 +5,11 @@ import logging
 
 import tyro
 
-from miniqm import train
+from miniqm.training import train
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Parses `RunConfig` CLI arguments via `tyro` and runs the training loop."""
+    """Parses CLI arguments via tyro and runs the training loop."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
