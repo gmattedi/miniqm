@@ -43,3 +43,14 @@ def test_py3dmol_viewers_construct_without_error() -> None:
     assert isinstance(mol_view, py3Dmol.view)
     assert isinstance(overlay_view, py3Dmol.view)
     assert isinstance(traj_view, py3Dmol.view)
+
+
+def test_normalize_trajectory_frames_rescales_high_variance_frames() -> None:
+    atom_mask = np.array([True, True, False], dtype=np.bool_)
+    final_frame = np.array([[2.0, 0.0, 0.0], [-2.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
+    noisy_frame = final_frame * 50.0
+    trajectory = np.stack((noisy_frame, final_frame), axis=0)
+
+    normalized = viz.normalize_trajectory_frames(trajectory, atom_mask)
+    np.testing.assert_allclose(normalized[0, atom_mask], final_frame[atom_mask], rtol=1e-5)
+    np.testing.assert_allclose(normalized[1, atom_mask], final_frame[atom_mask], rtol=1e-5)

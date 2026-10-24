@@ -9,6 +9,9 @@ from miniqm import jaxtypes as jt
 
 _ELEMENT_SYMBOLS: Final = ("H", "C", "N", "O", "F")
 _NUM_ELEMENTS: Final = len(_ELEMENT_SYMBOLS)
+_MIN_TARGET_RMS: Final = 0.8
+_RMS_FLOOR: Final = 1e-8
+_FINAL_FRAME_REPEATS: Final = 8
 
 
 @jt.typed
@@ -164,11 +167,37 @@ def show_overlay(
 
 
 @jt.typed
+def normalize_trajectory_frames(
+    trajectory: jt.Float[np.ndarray, "num_frames num_atoms 3"],
+    atom_mask: jt.Bool[np.ndarray, " num_atoms"],
+) -> jt.Float[np.ndarray, "num_frames num_atoms 3"]:
+    """Normalizes each trajectory frame's RMS radius to the final frame's molecular scale.
+
+    Args:
+        trajectory: Padded 3D coordinate frames across reverse diffusion steps.
+        atom_mask: Boolean mask indicating valid atoms.
+
+    Returns:
+        Coordinate trajectory where every frame matches the final molecular RMS spread.
+    """
+    valid_coords = trajectory[:, atom_mask, :]
+    frame_rms = np.sqrt(np.mean(np.square(valid_coords), axis=(1, 2)))
+    target_rms = max(float(frame_rms[-1]), _MIN_TARGET_RMS)
+    scales = np.where(
+        frame_rms > _RMS_FLOOR,
+        target_rms / np.maximum(frame_rms, _RMS_FLOOR),
+        1.0,
+    )
+    return (trajectory * scales[:, None, None]).astype(trajectory.dtype, copy=False)
+
+
+@jt.typed
 def show_trajectory(
     trajectory: jt.Float[np.ndarray, "num_frames num_atoms 3"],
     atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"],
     atom_mask: jt.Bool[np.ndarray, " num_atoms"],
     *,
+    normalize_scale: bool = True,
     interval_ms: int = 60,
     width: int = 500,
     height: int = 380,
@@ -179,6 +208,7 @@ def show_trajectory(
         trajectory: Padded 3D coordinate frames.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Boolean mask indicating valid atoms.
+        normalize_scale: Whether to rescale frames to a consistent molecular RMS spread.
         interval_ms: Delay between animation frames in milliseconds.
         width: Viewer width in pixels.
         height: Viewer height in pixels.
@@ -186,10 +216,15 @@ def show_trajectory(
     Returns:
         Configured 3D viewer instance with loop animation enabled.
     """
-    xyz_traj = format_xyz_trajectory(trajectory, atom_features, atom_mask)
+    display_traj = (
+        normalize_trajectory_frames(trajectory, atom_mask) if normalize_scale else trajectory
+    )
+    final_hold = np.repeat(display_traj[-1:], _FINAL_FRAME_REPEATS, axis=0)
+    padded_traj = np.concatenate((display_traj, final_hold), axis=0)
+    xyz_traj = format_xyz_trajectory(padded_traj, atom_features, atom_mask)
     viewer = py3Dmol.view(width=width, height=height)
     viewer.addModelsAsFrames(xyz_traj, "xyz")
-    viewer.setStyle({"stick": {"radius": 0.15}, "sphere": {"scale": 0.25}})
+    viewer.setStyle({"stick": {"radius": 0.15}, "sphere": {"scale": 0.28}})
     viewer.zoomTo()
     viewer.animate({"loop": "backAndForth", "interval": interval_ms})
     return viewer
