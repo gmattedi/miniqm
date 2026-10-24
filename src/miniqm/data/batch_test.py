@@ -245,9 +245,27 @@ def test_featurize_smiles_rejects_invalid_smiles() -> None:
         batch.featurize_smiles("not_a_smiles")
 
 
+def test_collate_smiles_pads_graph_features() -> None:
+    expected_hf = _make_expected_hf_features()
+    smiles_batch = batch.collate_smiles(("F",), max_atoms=4)
+
+    expected_atom_features = np.zeros((1, 4, batch.NUM_ATOM_FEATURES), dtype=np.float32)
+    expected_atom_features[0, :2] = expected_hf.atom_features
+    expected_bond_features = np.zeros((1, 4, 4, batch.NUM_BOND_FEATURES), dtype=np.float32)
+    expected_bond_features[0, :2, :2] = expected_hf.bond_features
+    expected_mask = np.array([[True, True, False, False]], dtype=np.bool_)
+
+    np.testing.assert_array_equal(smiles_batch.atom_features, expected_atom_features)
+    np.testing.assert_array_equal(smiles_batch.bond_features, expected_bond_features)
+    np.testing.assert_array_equal(smiles_batch.atom_mask, expected_mask)
+
+
 def test_collate_batch_validates_preconditions() -> None:
     with pytest.raises(ValueError, match="Expected non-empty sequence"):
         batch.collate_batch(())
+
+    with pytest.raises(ValueError, match="Expected non-empty sequence"):
+        batch.collate_smiles(())
 
     with pytest.raises(ValueError, match="exceeding max_atoms=1"):
         batch.collate_batch((_make_hf_molecule(),), max_atoms=1)

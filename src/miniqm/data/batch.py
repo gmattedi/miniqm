@@ -33,6 +33,15 @@ _BOND_TYPES: Final = (
     Chem.BondType.TRIPLE,
     Chem.BondType.AROMATIC,
 )
+NUM_ATOM_FEATURES: Final = (
+    len(_ELEMENTS)
+    + (len(_DEGREES) + 1)
+    + len(_FORMAL_CHARGES)
+    + (len(_HYBRIDIZATIONS) + 1)
+    + 2
+    + (len(_CHIRAL_CODES) + 1)
+)
+NUM_BOND_FEATURES: Final = len(_BOND_TYPES) + 2
 
 
 @jt.typed
@@ -325,6 +334,59 @@ def center_positions(
     return positions - positions.mean(axis=0, keepdims=True)
 
 
+def _pad_graph_features(
+    graphs: Sequence[GraphFeatures],
+    *,
+    max_atoms: int,
+) -> Batch:
+    """Pads a sequence of 2D molecular graph features into a fixed-shape batch."""
+    batch_size = len(graphs)
+    _, num_atom_features = graphs[0].atom_features.shape
+    _, _, num_bond_features = graphs[0].bond_features.shape
+
+    atom_features = np.zeros((batch_size, max_atoms, num_atom_features), dtype=np.float32)
+    bond_features = np.zeros(
+        (batch_size, max_atoms, max_atoms, num_bond_features), dtype=np.float32
+    )
+    atom_mask = np.zeros((batch_size, max_atoms), dtype=np.bool_)
+
+    for batch_idx, graph in enumerate(graphs):
+        num_atoms, _ = graph.atom_features.shape
+        if num_atoms > max_atoms:
+            raise ValueError(
+                f"Molecule at batch_idx={batch_idx} has {num_atoms} atoms, exceeding {max_atoms=}."
+            )
+        atom_features[batch_idx, :num_atoms] = graph.atom_features
+        bond_features[batch_idx, :num_atoms, :num_atoms] = graph.bond_features
+        atom_mask[batch_idx, :num_atoms] = True
+
+    return Batch(
+        atom_features=atom_features,
+        bond_features=bond_features,
+        atom_mask=atom_mask,
+    )
+
+
+def collate_smiles(
+    smiles_seq: Sequence[str],
+    *,
+    max_atoms: int = MAX_ATOMS,
+) -> Batch:
+    """Featurizes and pads a sequence of SMILES strings into a fixed-shape batch.
+
+    Args:
+        smiles_seq: Non-empty sequence of SMILES strings.
+        max_atoms: Padded atom dimension.
+
+    Returns:
+        Padded batch of 2D graph features and valid-atom masks for conformer generation.
+    """
+    if not smiles_seq:
+        raise ValueError("Expected non-empty sequence of SMILES strings to collate.")
+    graphs = tuple(featurize_smiles(smiles) for smiles in smiles_seq)
+    return _pad_graph_features(graphs, max_atoms=max_atoms)
+
+
 def collate_batch(
     molecules: Sequence[schema.Molecule],
     *,
@@ -342,37 +404,16 @@ def collate_batch(
     if not molecules:
         raise ValueError("Expected non-empty sequence of molecules to collate.")
 
-    features_per_mol = tuple(featurize_molecule(mol) for mol in molecules)
+    graphs = tuple(featurize_molecule(mol) for mol in molecules)
+    graph_batch = _pad_graph_features(graphs, max_atoms=max_atoms)
     batch_size = len(molecules)
-    _, num_atom_features = features_per_mol[0].atom_features.shape
-    _, _, num_bond_features = features_per_mol[0].bond_features.shape
-
-    atom_features = np.zeros((batch_size, max_atoms, num_atom_features), dtype=np.float32)
-    bond_features = np.zeros(
-        (batch_size, max_atoms, max_atoms, num_bond_features), dtype=np.float32
-    )
-    atom_mask = np.zeros((batch_size, max_atoms), dtype=np.bool_)
     positions = np.zeros((batch_size, max_atoms, _SPATIAL_DIMS), dtype=np.float32)
     labels = np.array(
         tuple(dataclasses.astuple(mol.labels) for mol in molecules),
         dtype=np.float32,
     )
 
-    for batch_idx, (mol, graph) in enumerate(zip(molecules, features_per_mol, strict=True)):
-        num_atoms = mol.num_atoms
-        if num_atoms > max_atoms:
-            raise ValueError(
-                f"Molecule index={mol.index} has {num_atoms} atoms, exceeding {max_atoms=}."
-            )
-        atom_features[batch_idx, :num_atoms] = graph.atom_features
-        bond_features[batch_idx, :num_atoms, :num_atoms] = graph.bond_features
-        atom_mask[batch_idx, :num_atoms] = True
-        positions[batch_idx, :num_atoms] = center_positions(mol.positions)
+    for batch_idx, mol in enumerate(molecules):
+        positions[batch_idx, : mol.num_atoms] = center_positions(mol.positions)
 
-    return Batch(
-        atom_features=atom_features,
-        bond_features=bond_features,
-        atom_mask=atom_mask,
-        positions=positions,
-        labels=labels,
-    )
+    return dataclasses.replace(graph_batch, positions=positions, labels=labels)

@@ -432,8 +432,12 @@ def _write_scalars(
         handle.write(json.dumps(record) + "\n")
 
 
-def _write_run_config(config: RunConfig) -> None:
-    """Writes the serialized run configuration to the run directory."""
+def write_run_config(config: RunConfig) -> None:
+    """Writes the serialized run configuration to the run directory.
+
+    Args:
+        config: End-to-end training and evaluation configuration.
+    """
     config.run_dir.mkdir(parents=True, exist_ok=True)
     (config.run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     config_dict = dataclasses.asdict(config)
@@ -467,7 +471,7 @@ def run_training(config: RunConfig) -> TrainState:
     Returns:
         Final training state after all configured optimization steps.
     """
-    _write_run_config(config)
+    write_run_config(config)
     checkpoints_dir = config.run_dir / "checkpoints"
     metrics_path = config.run_dir / "metrics.jsonl"
 
