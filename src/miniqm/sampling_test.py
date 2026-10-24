@@ -68,7 +68,16 @@ def test_sample_coordinates_returns_zero_centered_masked_positions() -> None:
         batch=setup.batch,
         config=sampling_config,
     )
+    trajectory = sampling.sample_trajectory(
+        jax.random.key(2),
+        setup.denoiser,
+        setup.params,
+        batch=setup.batch,
+        config=sampling_config,
+    )
 
+    assert trajectory.shape == (6, 2, 5, 3)
+    np.testing.assert_allclose(trajectory[-1], sampled_positions, rtol=1e-6, atol=1e-6)
     assert sampled_positions.shape == (2, 5, 3)
     assert bool(jnp.all(jnp.isfinite(sampled_positions)))
     np.testing.assert_allclose(jnp.sum(sampled_positions, axis=1), 0.0, atol=1e-5)

@@ -89,15 +89,15 @@ def _euler_churn_step(
 
 
 @jt.typed
-def sample_coordinates(
+def sample_trajectory(
     key: jt.Array,
     denoiser: model.Denoiser,
     params: flax_typing.VariableDict,
     *,
     batch: batch_lib.JaxBatch,
     config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
-) -> jt.Float[jt.Array, "batch num_atoms 3"]:
-    """Generates 3D molecular coordinates from Gaussian noise via Euler integration with churn.
+) -> jt.Float[jt.Array, "num_frames batch num_atoms 3"]:
+    """Generates the full reverse-diffusion coordinate trajectory from Gaussian noise.
 
     Args:
         key: JAX PRNG key.
@@ -107,10 +107,11 @@ def sample_coordinates(
         config: Reverse integration and stochastic churn parameters.
 
     Returns:
-        Sampled zero-centered 3D coordinates with padded slots zeroed.
+        Coordinate trajectory of shape `(num_steps + 1, batch, num_atoms, 3)` from
+        initial noise (index 0) to final denoised coordinates (index -1).
     """
     _LOGGER.info(
-        "Sampling 3D coordinates over %d steps (gamma_0=%.2f, step_scale=%.2f).",
+        "Sampling 3D coordinate trajectory over %d steps (gamma_0=%.2f, step_scale=%.2f).",
         config.num_steps,
         config.gamma_0,
         config.step_scale,
@@ -131,7 +132,7 @@ def sample_coordinates(
     def scan_body(
         positions: jt.Float[jt.Array, "batch num_atoms 3"],
         step_inputs: tuple[jt.Array, jt.Float[jt.Array, ""], jt.Float[jt.Array, ""]],
-    ) -> tuple[jt.Float[jt.Array, "batch num_atoms 3"], None]:
+    ) -> tuple[jt.Float[jt.Array, "batch num_atoms 3"], jt.Float[jt.Array, "batch num_atoms 3"]]:
         """Advances the coordinate trajectory by one reverse diffusion step."""
         step_key, sigma_current, sigma_next = step_inputs
         next_positions = _euler_churn_step(
@@ -144,11 +145,42 @@ def sample_coordinates(
             batch=batch,
             config=config,
         )
-        return next_positions, None
+        return next_positions, next_positions
 
-    final_positions, _ = jax.lax.scan(
+    _, step_frames = jax.lax.scan(
         scan_body,
         initial_positions,
         (step_keys, schedule[:-1], schedule[1:]),
     )
-    return final_positions
+    # (num_steps + 1, batch, num_atoms, 3) full trajectory with initial noise prepended.
+    return jnp.concatenate((initial_positions[None, ...], step_frames), axis=0)
+
+
+@jt.typed
+def sample_coordinates(
+    key: jt.Array,
+    denoiser: model.Denoiser,
+    params: flax_typing.VariableDict,
+    *,
+    batch: batch_lib.JaxBatch,
+    config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
+) -> jt.Float[jt.Array, "batch num_atoms 3"]:
+    """Generates 3D molecular coordinates from Gaussian noise via Euler integration with churn.
+
+    Args:
+        key: JAX PRNG key.
+        denoiser: Configured Denoiser Linen module.
+        params: Initialized model parameters.
+        batch: Padded molecular graph features and valid-atom mask.
+        config: Reverse integration and stochastic churn parameters.
+
+    Returns:
+        Sampled zero-centered 3D coordinates with padded slots zeroed.
+    """
+    return sample_trajectory(
+        key,
+        denoiser,
+        params,
+        batch=batch,
+        config=config,
+    )[-1]
