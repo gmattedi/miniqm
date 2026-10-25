@@ -148,11 +148,11 @@ def show_molecule(
 
 @jt.typed
 def show_overlay(
+    *,
     reference_positions: jt.Float[np.ndarray, "num_atoms 3"],
     candidate_positions: jt.Float[np.ndarray, "num_atoms 3"],
     atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"],
     atom_mask: jt.Bool[np.ndarray, " num_atoms"],
-    *,
     width: int = _DEFAULT_VIEWER_WIDTH,
     height: int = _DEFAULT_VIEWER_HEIGHT,
 ) -> py3Dmol.view:

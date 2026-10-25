@@ -2,9 +2,9 @@
 
 # miniqm Package
 
-Core library implementing QM9 graph featurization, Karras EDM 3D coordinate diffusion, Optax training, and interactive 3D molecular visualization.
+Core library implementing heavy-atom QM9 graph featurization, Karras EDM joint 2D+3D molecular diffusion, Optax training, and interactive 3D molecular visualization.
 
-* `data/` converts QM9 Parquet splits and SMILES strings into padded 2D molecular graph batches and device arrays.
-* `diffusion/` implements 3D rigid-body geometry, the Karras noise schedule, the pair-biased Transformer denoiser, Kabsch-aligned losses, and Euler conformer sampling.
+* `data/` converts QM9 Parquet splits and SMILES/SMARTS templates into padded heavy-atom molecular graph batches, per-channel conditioning masks, and device arrays.
+* `diffusion/` implements 3D rigid-body geometry, the Karras noise schedule and random subgraph conditioning masks, the pair-biased Transformer denoiser, Kabsch-aligned coordinate and one-hot 2D losses, evaluation metrics, and reverse Euler molecule/conformer sampling.
 * `training/` manages optimizer schedules, EMA weights, checkpoint serialization, validation metrics, and the training loop.
 * Top-level utilities provide centralized Pydantic configurations (`config.py`), runtime shape-checked array typing (`jaxtypes.py`), CLI entrypoints (`runner.py`), and `py3Dmol` 3D viewers (`viz.py`) for single molecules, conformer overlays, and multi-frame diffusion trajectories.
