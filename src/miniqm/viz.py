@@ -226,5 +226,5 @@ def show_trajectory(
     viewer.addModelsAsFrames(xyz_traj, "xyz")
     viewer.setStyle({"stick": {"radius": 0.15}, "sphere": {"scale": 0.28}})
     viewer.zoomTo()
-    viewer.animate({"loop": "backAndForth", "interval": interval_ms})
+    viewer.animate({"loop": "forward", "interval": interval_ms})
     return viewer

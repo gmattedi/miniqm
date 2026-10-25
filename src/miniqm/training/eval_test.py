@@ -142,17 +142,24 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
         eval_lib.SampleSmilesConfig(
             run_dir=run_dir,
             smiles_file=smiles_file,
+            num_conformers=2,
             num_sampling_steps=2,
             output_sdf=output_sdf,
+            seed=10,
         )
     )
-    assert len(mols) == 2
+    assert len(mols) == 4
     assert output_sdf.is_file()
     supplier = Chem.SDMolSupplier(str(output_sdf), removeHs=False)
     loaded_mols = tuple(supplier)
-    assert len(loaded_mols) == 2
+    assert len(loaded_mols) == 4
     assert loaded_mols[0].GetNumAtoms() == 2
-    assert loaded_mols[1].GetNumAtoms() == 3
+    assert loaded_mols[0].GetProp("CONFORMER_ID") == "0"
+    assert loaded_mols[0].GetProp("SEED") == "10"
+    assert loaded_mols[1].GetNumAtoms() == 2
+    assert loaded_mols[1].GetProp("CONFORMER_ID") == "1"
+    assert loaded_mols[1].GetProp("SEED") == "11"
+    assert loaded_mols[2].GetNumAtoms() == 3
 
 
 def test_eval_and_sample_configs_reject_invalid_values() -> None:
@@ -161,6 +168,9 @@ def test_eval_and_sample_configs_reject_invalid_values() -> None:
 
     with pytest.raises(ValueError, match="positive num_sampling_steps"):
         eval_lib.EvalConfig(num_sampling_steps=0)
+
+    with pytest.raises(ValueError, match="positive num_conformers"):
+        eval_lib.SampleSmilesConfig(num_conformers=0)
 
     with pytest.raises(ValueError, match="positive num_sampling_steps"):
         eval_lib.SampleSmilesConfig(num_sampling_steps=0)

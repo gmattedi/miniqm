@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+import itertools
 import json
 import logging
 import pathlib
@@ -128,9 +129,10 @@ class SampleSmilesConfig:
         smiles_file: Optional text file containing one SMILES string per line.
         checkpoint_name: Checkpoint filename inside the checkpoints subdirectory.
         use_ema: Whether to sample with EMA weights instead of raw optimizer weights.
+        num_conformers: Number of conformers to sample per SMILES using seed offsets.
         num_sampling_steps: Optional override for the number of reverse Euler sampling steps.
         output_sdf: Destination SDF file path for the generated 3D conformers.
-        seed: Random seed for reverse-diffusion sampling.
+        seed: Base random seed for reverse-diffusion sampling.
     """
 
     run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
@@ -138,11 +140,14 @@ class SampleSmilesConfig:
     smiles_file: pathlib.Path | None = None
     checkpoint_name: str = "best.msgpack"
     use_ema: bool = True
+    num_conformers: int = 1
     num_sampling_steps: int | None = None
     output_sdf: pathlib.Path = pathlib.Path("sampled_conformers.sdf")
     seed: int = 0
 
     def __post_init__(self) -> None:
+        if self.num_conformers <= 0:
+            raise ValueError(f"Expected positive num_conformers, got {self.num_conformers}.")
         if self.num_sampling_steps is not None and self.num_sampling_steps <= 0:
             raise ValueError(
                 f"Expected positive num_sampling_steps, got {self.num_sampling_steps}."
@@ -551,6 +556,20 @@ def _resolve_smiles_inputs(config: SampleSmilesConfig) -> tuple[str, ...]:
     return config.smiles
 
 
+def _build_tagged_conformer(
+    smiles: str,
+    positions: jt.Float[np.ndarray, "max_atoms 3"],
+    *,
+    conformer_idx: int,
+    seed: int,
+) -> Chem.Mol:
+    """Builds a 3D conformer molecule annotated with its conformer index and PRNG seed."""
+    mol = batch_lib.build_conformer_mol(smiles, positions)
+    mol.SetProp("CONFORMER_ID", str(conformer_idx))
+    mol.SetProp("SEED", str(seed))
+    return mol
+
+
 def run_smiles_sampling(config: SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
     """Generates 3D conformers for a list of SMILES strings and writes them to an SDF file.
 
@@ -572,30 +591,42 @@ def run_smiles_sampling(config: SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
         else loaded.sampling_config
     )
 
-    host_batch = batch_lib.collate_smiles(smiles_seq)
+    jax_batch = batch_lib.collate_smiles(smiles_seq).to_jax()
     denoiser = model_lib.Denoiser(config=loaded.model_config)
-    generated = np.asarray(
-        sampling_lib.sample_coordinates(
-            jax.random.key(config.seed),
-            denoiser,
-            active_params,
-            batch=host_batch.to_jax(),
-            config=sampling_config,
-        ),
-        dtype=np.float32,
+    generated_per_seed = tuple(
+        np.asarray(
+            sampling_lib.sample_coordinates(
+                jax.random.key(config.seed + conf_idx),
+                denoiser,
+                active_params,
+                batch=jax_batch,
+                config=sampling_config,
+            ),
+            dtype=np.float32,
+        )
+        for conf_idx in range(config.num_conformers)
     )
 
     conformer_mols = tuple(
-        batch_lib.build_conformer_mol(smiles, generated[mol_idx])
-        for mol_idx, smiles in enumerate(smiles_seq)
+        _build_tagged_conformer(
+            smiles,
+            generated[mol_idx],
+            conformer_idx=conf_idx,
+            seed=config.seed + conf_idx,
+        )
+        for (mol_idx, smiles), (conf_idx, generated) in itertools.product(
+            enumerate(smiles_seq),
+            enumerate(generated_per_seed),
+        )
     )
     config.output_sdf.parent.mkdir(parents=True, exist_ok=True)
     with Chem.SDWriter(str(config.output_sdf)) as writer:
         for mol in conformer_mols:
             writer.write(mol)
     _LOGGER.info(
-        "Generated %d conformer(s) from checkpoint step=%d and wrote %s",
-        len(smiles_seq),
+        "Generated %d conformer(s) (%d per molecule) from checkpoint step=%d and wrote %s",
+        len(conformer_mols),
+        config.num_conformers,
         loaded.checkpoint.step,
         config.output_sdf,
     )

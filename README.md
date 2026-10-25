@@ -29,7 +29,7 @@ Evaluate a saved run on the test split or sample 3D conformers from arbitrary SM
 
 ```bash
 uv run miniqm-eval --run-dir runs/qm9_experiment --test-path data/test.parquet
-uv run miniqm-sample --run-dir runs/qm9_experiment --smiles CCO c1ccccc1 --output-sdf conformers.sdf
+uv run miniqm-sample --run-dir runs/qm9_experiment --smiles CCO c1ccccc1 --num-conformers 5 --output-sdf conformers.sdf
 ```
 
 Run lint, type checking, and tests:
