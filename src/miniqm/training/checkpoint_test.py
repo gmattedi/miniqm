@@ -4,21 +4,21 @@ from typing import Final
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
+from miniqm import config as config_lib
 from miniqm.data import batch as batch_lib
-from miniqm.diffusion import model
 from miniqm.training import checkpoint, train
 
-_TINY_TRAIN_CONFIG: Final = train.TrainConfig(
-    model=model.DenoiserConfig(
-        transformer=model.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
+_TINY_TRAIN_CONFIG: Final = config_lib.TrainConfig(
+    model=config_lib.DenoiserConfig(
+        transformer=config_lib.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
     ),
     ema_decay=0.8,
 )
 
 
 def _make_dummy_batch() -> batch_lib.JaxBatch:
-    """Builds a minimal 2-molecule padded JAX batch for checkpoint tests."""
     return batch_lib.JaxBatch(
         atom_features=jnp.ones((2, 4, 22), dtype=jnp.float32),
         bond_features=jnp.ones((2, 4, 4, 6), dtype=jnp.float32),
@@ -27,7 +27,7 @@ def _make_dummy_batch() -> batch_lib.JaxBatch:
     )
 
 
-def test_save_and_load_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
+def test_save_and_load_checkpoint_round_trip(tmp_path: pathlib.Path):
     dummy_batch = _make_dummy_batch()
     initial_state = train.init_train_state(
         jax.random.key(0),
@@ -79,7 +79,7 @@ def test_save_and_load_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
         np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
-def test_load_run_checkpoint_restores_configs_and_weights(tmp_path: pathlib.Path) -> None:
+def test_load_run_checkpoint_restores_configs_and_weights(tmp_path: pathlib.Path):
     dummy_batch = _make_dummy_batch()
     state = train.init_train_state(
         jax.random.key(3),
@@ -88,10 +88,10 @@ def test_load_run_checkpoint_restores_configs_and_weights(tmp_path: pathlib.Path
     )
     parent_dir = tmp_path / "experiment"
     run_dir = parent_dir / "20261024_220000"
-    run_config = train.RunConfig(run_dir=run_dir, train=_TINY_TRAIN_CONFIG)
+    run_config = config_lib.RunConfig(run_dir=run_dir, train=_TINY_TRAIN_CONFIG)
     train.write_run_config(run_config)
     checkpoint.save_checkpoint(
-        run_dir / "checkpoints" / "best.msgpack",
+        run_dir / "checkpoints" / config_lib.CheckpointName.BEST,
         checkpoint.Checkpoint(step=7, params=state.params, ema_params=state.ema_params),
     )
 
@@ -106,3 +106,18 @@ def test_load_run_checkpoint_restores_configs_and_weights(tmp_path: pathlib.Path
         strict=True,
     ):
         np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_resolve_run_dir_picks_latest_timestamp_and_errors_when_missing(
+    tmp_path: pathlib.Path,
+):
+    parent_dir = tmp_path / "experiment"
+    older = parent_dir / "20261024_100000"
+    newer = parent_dir / "20261024_220000"
+    for run_dir in (older, newer):
+        train.write_run_config(config_lib.RunConfig(run_dir=run_dir, train=_TINY_TRAIN_CONFIG))
+
+    assert checkpoint.resolve_run_dir(parent_dir) == newer
+
+    with pytest.raises(FileNotFoundError, match=r"No config\.json found"):
+        checkpoint.resolve_run_dir(tmp_path / "empty")

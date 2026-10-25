@@ -8,6 +8,7 @@ from typing import Final
 from rich import logging as rich_logging
 import tyro
 
+from miniqm import config as config_lib
 from miniqm.training import eval as eval_lib
 from miniqm.training import train
 
@@ -22,14 +23,14 @@ def _configure_logging() -> None:
         level=logging.INFO,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[rich_logging.RichHandler(rich_tracebacks=True, show_path=False)],
+        handlers=(rich_logging.RichHandler(rich_tracebacks=True, show_path=False),),
     )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Parses training CLI arguments via tyro and runs the training loop."""
+    """Parses training CLI arguments and runs the training loop."""
     _configure_logging()
-    config = tyro.cli(train.RunConfig, args=argv)
+    config = tyro.cli(config_lib.RunConfig, args=argv)
     try:
         train.run_training(config)
     except KeyboardInterrupt as exc:
@@ -38,9 +39,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def eval_main(argv: Sequence[str] | None = None) -> None:
-    """Parses evaluation CLI arguments via tyro and evaluates a checkpoint on a test split."""
+    """Parses evaluation CLI arguments and evaluates a checkpoint on a test split."""
     _configure_logging()
-    config = tyro.cli(eval_lib.EvalConfig, args=argv)
+    config = tyro.cli(config_lib.EvalConfig, args=argv)
     try:
         eval_lib.run_evaluation(config)
     except KeyboardInterrupt as exc:
@@ -49,9 +50,9 @@ def eval_main(argv: Sequence[str] | None = None) -> None:
 
 
 def sample_main(argv: Sequence[str] | None = None) -> None:
-    """Parses SMILES inference CLI arguments via tyro and writes sampled SDF conformers."""
+    """Parses SMILES inference CLI arguments and writes sampled SDF conformers."""
     _configure_logging()
-    config = tyro.cli(eval_lib.SampleSmilesConfig, args=argv)
+    config = tyro.cli(config_lib.SampleSmilesConfig, args=argv)
     try:
         eval_lib.run_smiles_sampling(config)
     except KeyboardInterrupt as exc:

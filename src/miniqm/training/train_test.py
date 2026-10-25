@@ -7,15 +7,17 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
-from miniqm.diffusion import geometry, model, noise
+from miniqm.diffusion import geometry
+from miniqm.training import eval as eval_lib
 from miniqm.training import train
 
-_TEST_TRAIN_CONFIG: Final = train.TrainConfig(
-    model=model.DenoiserConfig(
-        transformer=model.TransformerConfig(hidden_dim=32, num_layers=2, num_heads=4),
-        noise=noise.NoiseConfig(log_sigma_mean=0.5, log_sigma_std=0.05),
+_TEST_TRAIN_CONFIG: Final = config_lib.TrainConfig(
+    model=config_lib.DenoiserConfig(
+        transformer=config_lib.TransformerConfig(hidden_dim=32, num_layers=2, num_heads=4),
+        noise=config_lib.NoiseConfig(log_sigma_mean=0.5, log_sigma_std=0.05),
     ),
     learning_rate=3e-3,
     warmup_steps=2,
@@ -27,7 +29,6 @@ _TEST_TRAIN_CONFIG: Final = train.TrainConfig(
 
 @jt.typed
 def _make_synthetic_batch() -> batch_lib.JaxBatch:
-    """Builds a 2-molecule padded JAX batch with zero-centered 3D target coordinates."""
     pos_key, atom_key, bond_key = jax.random.split(jax.random.key(0), 3)
     atom_mask = jnp.array(
         [
@@ -46,7 +47,7 @@ def _make_synthetic_batch() -> batch_lib.JaxBatch:
     )
 
 
-def test_init_train_state_creates_matching_params_and_ema() -> None:
+def test_init_train_state_creates_matching_params_and_ema():
     synthetic_batch = _make_synthetic_batch()
     state = train.init_train_state(
         jax.random.key(1),
@@ -62,7 +63,7 @@ def test_init_train_state_creates_matching_params_and_ema() -> None:
         np.testing.assert_array_equal(param_leaf, ema_leaf)
 
 
-def test_parameter_summary_and_tabulate_report_named_submodules() -> None:
+def test_parameter_summary_and_tabulate_report_named_submodules():
     synthetic_batch = _make_synthetic_batch()
     state = train.init_train_state(
         jax.random.key(1),
@@ -83,7 +84,7 @@ def test_parameter_summary_and_tabulate_report_named_submodules() -> None:
     assert "coord_head" in table
 
 
-def test_train_step_updates_parameters_and_ema_weights() -> None:
+def test_train_step_updates_parameters_and_ema_weights():
     synthetic_batch = _make_synthetic_batch()
     initial_state = train.init_train_state(
         jax.random.key(2),
@@ -122,7 +123,7 @@ def test_train_step_updates_parameters_and_ema_weights() -> None:
         np.testing.assert_allclose(ema_leaf, expected_ema, rtol=1e-5, atol=1e-6)
 
 
-def test_eval_step_matches_forward_loss_of_train_step() -> None:
+def test_eval_step_matches_forward_loss_of_train_step():
     synthetic_batch = _make_synthetic_batch()
     state = train.init_train_state(
         jax.random.key(3),
@@ -132,7 +133,13 @@ def test_eval_step_matches_forward_loss_of_train_step() -> None:
     step_rng, _ = jax.random.split(state.rng)
 
     train_out = train.train_step(state, synthetic_batch, config=_TEST_TRAIN_CONFIG)
-    eval_out = jax.jit(functools.partial(train.eval_step, config=_TEST_TRAIN_CONFIG))(
+    eval_out = jax.jit(
+        functools.partial(
+            eval_lib.eval_step,
+            model_config=_TEST_TRAIN_CONFIG.model,
+            loss_config=_TEST_TRAIN_CONFIG.loss,
+        )
+    )(
         state.params,
         step_rng,
         synthetic_batch,
@@ -146,7 +153,7 @@ def test_eval_step_matches_forward_loss_of_train_step() -> None:
     )
 
 
-def test_short_training_loop_reduces_diffusion_loss_on_single_batch() -> None:
+def test_short_training_loop_reduces_diffusion_loss_on_single_batch():
     synthetic_batch = _make_synthetic_batch()
     state = train.init_train_state(
         jax.random.key(4),
@@ -154,7 +161,13 @@ def test_short_training_loop_reduces_diffusion_loss_on_single_batch() -> None:
         config=_TEST_TRAIN_CONFIG,
     )
     jit_train_step = jax.jit(functools.partial(train.train_step, config=_TEST_TRAIN_CONFIG))
-    jit_eval_step = jax.jit(functools.partial(train.eval_step, config=_TEST_TRAIN_CONFIG))
+    jit_eval_step = jax.jit(
+        functools.partial(
+            eval_lib.eval_step,
+            model_config=_TEST_TRAIN_CONFIG.model,
+            loss_config=_TEST_TRAIN_CONFIG.loss,
+        )
+    )
 
     eval_rng = jax.random.key(99)
     initial_eval = jit_eval_step(state.params, eval_rng, synthetic_batch)
@@ -168,21 +181,30 @@ def test_short_training_loop_reduces_diffusion_loss_on_single_batch() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "error_match"),
     (
-        ({"learning_rate": 0.0}, "positive learning_rate"),
+        ({"learning_rate": 0.0}, "greater than 0"),
         ({"min_learning_rate": 1e-2, "learning_rate": 1e-3}, "min_learning_rate <= learning_rate"),
-        ({"warmup_steps": -1}, "non-negative warmup_steps"),
+        ({"warmup_steps": -1}, "greater than or equal to 0"),
         ({"warmup_steps": 100, "decay_steps": 100}, "decay_steps"),
-        ({"weight_decay": -0.1}, "non-negative weight_decay"),
-        ({"max_grad_norm": 0.0}, "positive max_grad_norm"),
-        ({"ema_decay": 1.5}, "ema_decay in \\[0, 1\\]"),
+        ({"weight_decay": -0.1}, "greater than or equal to 0"),
+        ({"max_grad_norm": 0.0}, "greater than 0"),
+        ({"ema_decay": 1.5}, "less than or equal to 1"),
+    ),
+    ids=(
+        "zero_lr",
+        "min_lr_exceeds_lr",
+        "negative_warmup",
+        "decay_not_greater_than_warmup",
+        "negative_weight_decay",
+        "zero_grad_norm",
+        "ema_decay_above_one",
     ),
 )
 def test_train_config_rejects_invalid_hyperparameters(
     kwargs: Mapping[str, float],
     error_match: str,
-) -> None:
+):
     with pytest.raises(ValueError, match=error_match):
-        train.TrainConfig(
+        config_lib.TrainConfig(
             learning_rate=float(kwargs.get("learning_rate", 3e-4)),
             min_learning_rate=float(kwargs.get("min_learning_rate", 1e-5)),
             warmup_steps=int(kwargs.get("warmup_steps", 1_000)),
@@ -193,6 +215,6 @@ def test_train_config_rejects_invalid_hyperparameters(
         )
 
 
-def test_run_config_rejects_invalid_num_devices() -> None:
-    with pytest.raises(ValueError, match="positive num_devices"):
-        train.RunConfig(num_devices=0)
+def test_run_config_rejects_invalid_num_devices():
+    with pytest.raises(ValueError, match="greater than 0"):
+        config_lib.RunConfig(num_devices=0)

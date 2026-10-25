@@ -10,10 +10,8 @@ from miniqm.diffusion import geometry, losses
 
 
 @jt.typed
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _TetrahedralBatch:
-    """Single-molecule batch containing a 4-atom chiral pyramid and 1 padded slot."""
-
     positions: jt.Float[jt.Array, "batch num_atoms 3"]
     atom_mask: jt.Bool[jt.Array, "batch num_atoms"]
     sigma: jt.Float[jt.Array, " batch"]
@@ -21,7 +19,6 @@ class _TetrahedralBatch:
 
 @jt.typed
 def _make_tetrahedral_batch() -> _TetrahedralBatch:
-    """Creates a 1-molecule batch containing a 4-atom non-planar pyramid and 1 padded slot."""
     raw_positions = jnp.array(
         [
             [
@@ -40,7 +37,7 @@ def _make_tetrahedral_batch() -> _TetrahedralBatch:
     return _TetrahedralBatch(positions=positions, atom_mask=atom_mask, sigma=sigma)
 
 
-def test_compute_diffusion_loss_is_zero_under_proper_rotation() -> None:
+def test_compute_diffusion_loss_is_zero_under_proper_rotation():
     batch = _make_tetrahedral_batch()
     rotated_pred = geometry.random_rotation(jax.random.key(0), batch.positions, batch.atom_mask)
 
@@ -58,7 +55,7 @@ def test_compute_diffusion_loss_is_zero_under_proper_rotation() -> None:
     np.testing.assert_allclose(float(output.lddt), 1.0, atol=1e-6)
 
 
-def test_aligned_mse_penalizes_mirror_enantiomer_while_distance_loss_is_zero() -> None:
+def test_aligned_mse_penalizes_mirror_enantiomer_while_distance_loss_is_zero():
     batch = _make_tetrahedral_batch()
     reflected_pred = batch.positions * jnp.array([1.0, 1.0, -1.0], dtype=jnp.float32)
 
@@ -85,7 +82,7 @@ def test_aligned_mse_penalizes_mirror_enantiomer_while_distance_loss_is_zero() -
 def test_pairwise_distance_loss_respects_cutoff_and_padding(
     cutoff: float,
     expected_loss: float,
-) -> None:
+):
     target_positions = jnp.array(
         [[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
         dtype=jnp.float32,
@@ -106,7 +103,7 @@ def test_pairwise_distance_loss_respects_cutoff_and_padding(
     np.testing.assert_allclose(float(dist_loss), expected_loss, rtol=1e-5, atol=1e-6)
 
 
-def test_compute_diffusion_loss_has_finite_gradients_and_zero_padded_grad() -> None:
+def test_compute_diffusion_loss_has_finite_gradients_and_zero_padded_grad():
     batch = _make_tetrahedral_batch()
     noisy_pred = (batch.positions + 0.25) * batch.atom_mask[..., None]
 
@@ -114,7 +111,6 @@ def test_compute_diffusion_loss_has_finite_gradients_and_zero_padded_grad() -> N
     def total_loss_fn(
         predicted_positions: jt.Float[jt.Array, "batch num_atoms 3"],
     ) -> jt.Float[jt.Array, ""]:
-        """Evaluates total diffusion loss as a scalar function of predicted coordinates."""
         return losses.compute_diffusion_loss(
             predicted_positions=predicted_positions,
             target_positions=batch.positions,
@@ -140,11 +136,12 @@ def test_compute_diffusion_loss_has_finite_gradients_and_zero_padded_grad() -> N
         (1.80, 0.25),
         (2.50, 0.0),
     ),
+    ids=("all_pass", "three_pass", "two_pass", "one_pass", "none_pass"),
 )
 def test_lddt_per_molecule_scores_distance_errors_across_thresholds(
     stretched_x: float,
     expected_lddt: float,
-) -> None:
+):
     target_positions = jnp.array(
         [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
         dtype=jnp.float32,

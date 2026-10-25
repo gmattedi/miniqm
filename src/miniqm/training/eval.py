@@ -3,18 +3,18 @@
 import dataclasses
 import functools
 import itertools
-import json
 import logging
-import pathlib
 from typing import Final, cast
 
 from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pydantic
 from rdkit import Chem
 from rich import progress
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.data import data_source
@@ -29,10 +29,10 @@ _LOGGER: Final = logging.getLogger(__name__)
 # Standard QM9 conformer generation RMSD coverage thresholds (in Angstroms).
 _STRICT_RMSD_THRESHOLD_A: Final = 0.5
 _LOOSE_RMSD_THRESHOLD_A: Final = 1.0
+_DIST_EPS: Final = 1e-8
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class ValidationMetrics:
+class ValidationMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Teacher-forced single-step validation loss breakdown across an evaluation split."""
 
     total_loss: float
@@ -42,8 +42,7 @@ class ValidationMetrics:
     lddt: float
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class SamplingMetrics:
+class SamplingMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Reverse-diffusion conformer generation RMSD and lDDT statistics on a validation batch."""
 
     sampled_rmsd_mean: float
@@ -52,8 +51,7 @@ class SamplingMetrics:
     sampled_lddt_median: float
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class DatasetSamplingMetrics:
+class DatasetSamplingMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Full reverse-diffusion conformer generation RMSD, lDDT, and coverage across a split."""
 
     sampled_rmsd_mean: float
@@ -66,7 +64,7 @@ class DatasetSamplingMetrics:
 
 @jax.tree_util.register_dataclass
 @jt.typed
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SampledBatchStats:
     """Per-molecule Kabsch RMSD and local lDDT for a batch of generated conformers."""
 
@@ -74,43 +72,7 @@ class SampledBatchStats:
     lddt: jt.Float[jt.Array, " batch"]
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class EvalConfig:
-    """Configuration for evaluating a trained checkpoint on a QM9 Parquet split.
-
-    Attributes:
-        run_dir: Training run directory containing saved configuration and checkpoints.
-        test_path: Path to the evaluation Parquet split.
-        checkpoint_name: Checkpoint filename inside the checkpoints subdirectory.
-        use_ema: Whether to evaluate EMA weights instead of raw optimizer weights.
-        batch_size: Number of molecules per evaluation batch.
-        max_test_molecules: Optional cap on the number of evaluated molecules.
-        num_sampling_steps: Optional override for the number of reverse Euler sampling steps.
-        output_path: Optional output JSON file path (defaults to test_metrics.json in run_dir).
-        seed: Random seed for teacher-forced evaluation and reverse-diffusion sampling.
-    """
-
-    run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
-    test_path: pathlib.Path = pathlib.Path("data/test.parquet")
-    checkpoint_name: str = "best.msgpack"
-    use_ema: bool = True
-    batch_size: int = 64
-    max_test_molecules: int | None = None
-    num_sampling_steps: int | None = None
-    output_path: pathlib.Path | None = None
-    seed: int = 0
-
-    def __post_init__(self) -> None:
-        if self.batch_size <= 0:
-            raise ValueError(f"Expected positive batch_size, got {self.batch_size}.")
-        if self.num_sampling_steps is not None and self.num_sampling_steps <= 0:
-            raise ValueError(
-                f"Expected positive num_sampling_steps, got {self.num_sampling_steps}."
-            )
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class TestEvaluationReport:
+class TestEvaluationReport(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Combined teacher-forced loss and reverse-diffusion sampling report on a test split."""
 
     step: int
@@ -119,49 +81,14 @@ class TestEvaluationReport:
     sampling_metrics: DatasetSamplingMetrics
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class SampleSmilesConfig:
-    """Configuration for generating 3D conformers from a sequence of SMILES strings.
-
-    Attributes:
-        run_dir: Training run directory containing saved configuration and checkpoints.
-        smiles: Sequence of SMILES strings to sample when smiles_file is not provided.
-        smiles_file: Optional text file containing one SMILES string per line.
-        checkpoint_name: Checkpoint filename inside the checkpoints subdirectory.
-        use_ema: Whether to sample with EMA weights instead of raw optimizer weights.
-        num_conformers: Number of conformers to sample per SMILES using seed offsets.
-        num_sampling_steps: Optional override for the number of reverse Euler sampling steps.
-        output_sdf: Destination SDF file path for the generated 3D conformers.
-        seed: Base random seed for reverse-diffusion sampling.
-    """
-
-    run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
-    smiles: tuple[str, ...] = ("CCO", "c1ccccc1")
-    smiles_file: pathlib.Path | None = None
-    checkpoint_name: str = "best.msgpack"
-    use_ema: bool = True
-    num_conformers: int = 1
-    num_sampling_steps: int | None = None
-    output_sdf: pathlib.Path = pathlib.Path("sampled_conformers.sdf")
-    seed: int = 0
-
-    def __post_init__(self) -> None:
-        if self.num_conformers <= 0:
-            raise ValueError(f"Expected positive num_conformers, got {self.num_conformers}.")
-        if self.num_sampling_steps is not None and self.num_sampling_steps <= 0:
-            raise ValueError(
-                f"Expected positive num_sampling_steps, got {self.num_sampling_steps}."
-            )
-
-
 @jt.typed
 def compute_batch_loss(
     params: flax_typing.VariableDict,
     noisy_sample: noise_lib.NoisySample,
     batch: batch_lib.JaxBatch,
     *,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    loss_config: losses_lib.LossConfig = losses_lib.DEFAULT_LOSS_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    loss_config: config_lib.LossConfig = config_lib.DEFAULT_LOSS_CONFIG,
 ) -> losses_lib.LossOutput:
     """Runs the denoiser on a corrupted sample and evaluates the diffusion loss."""
     denoiser = model_lib.Denoiser(config=model_config)
@@ -180,6 +107,7 @@ def compute_batch_loss(
         sigma=noisy_sample.sigma,
         atom_mask=batch.atom_mask,
         config=loss_config,
+        noise_config=model_config.noise,
     )
 
 
@@ -189,8 +117,8 @@ def eval_step(
     rng: jt.Array,
     batch: batch_lib.JaxBatch,
     *,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    loss_config: losses_lib.LossConfig = losses_lib.DEFAULT_LOSS_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    loss_config: config_lib.LossConfig = config_lib.DEFAULT_LOSS_CONFIG,
 ) -> losses_lib.LossOutput:
     """Evaluates the diffusion loss on a batch without updating parameters.
 
@@ -226,8 +154,8 @@ def _jit_eval_step(
     rng: jt.Array,
     batch: batch_lib.JaxBatch,
     *,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    loss_config: losses_lib.LossConfig = losses_lib.DEFAULT_LOSS_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    loss_config: config_lib.LossConfig = config_lib.DEFAULT_LOSS_CONFIG,
 ) -> losses_lib.LossOutput:
     """Evaluates the diffusion loss on a batch under a cached JIT compilation."""
     return eval_step(
@@ -246,10 +174,10 @@ def evaluate_loss(
     val_source: data_source.DataSource,
     *,
     batch_size: int,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    loss_config: losses_lib.LossConfig = losses_lib.DEFAULT_LOSS_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    loss_config: config_lib.LossConfig = config_lib.DEFAULT_LOSS_CONFIG,
 ) -> ValidationMetrics:
-    """Computes mean teacher-forced diffusion loss and RMSD across validation batches.
+    """Computes molecule-weighted mean teacher-forced diffusion loss and metrics across batches.
 
     Args:
         params: Model parameters to evaluate (typically EMA weights).
@@ -260,20 +188,13 @@ def evaluate_loss(
         loss_config: Diffusion loss weights and distance cutoff configuration.
 
     Returns:
-        Mean validation loss components across all batches.
+        Molecule-weighted mean validation loss components across all batches.
     """
-    totals: list[float] = []
-    mses: list[float] = []
-    dists: list[float] = []
-    rmsds: list[float] = []
-    lddts: list[float] = []
-
+    batch_outputs: list[tuple[losses_lib.LossOutput, int]] = []
     step_rng = rng
-    for host_batch in val_source.iter_batches(
-        batch_size=batch_size,
-        drop_last=False,
-    ):
+    for host_batch in val_source.iter_batches(batch_size=batch_size, drop_last=False):
         step_rng, batch_rng = jax.random.split(step_rng)
+        batch_count, _ = host_batch.atom_mask.shape
         loss_out = cast(
             "losses_lib.LossOutput",
             _jit_eval_step(
@@ -284,18 +205,23 @@ def evaluate_loss(
                 loss_config=loss_config,
             ),
         )
-        totals.append(float(loss_out.total_loss))
-        mses.append(float(loss_out.aligned_mse_loss))
-        dists.append(float(loss_out.distance_loss))
-        rmsds.append(float(loss_out.rmsd))
-        lddts.append(float(loss_out.lddt))
+        batch_outputs.append((loss_out, batch_count))
 
+    weights = np.array(tuple(count for _, count in batch_outputs), dtype=np.float64)
     return ValidationMetrics(
-        total_loss=float(np.mean(totals)),
-        aligned_mse_loss=float(np.mean(mses)),
-        distance_loss=float(np.mean(dists)),
-        rmsd=float(np.mean(rmsds)),
-        lddt=float(np.mean(lddts)),
+        total_loss=float(
+            np.average(tuple(float(out.total_loss) for out, _ in batch_outputs), weights=weights)
+        ),
+        aligned_mse_loss=float(
+            np.average(
+                tuple(float(out.aligned_mse_loss) for out, _ in batch_outputs), weights=weights
+            )
+        ),
+        distance_loss=float(
+            np.average(tuple(float(out.distance_loss) for out, _ in batch_outputs), weights=weights)
+        ),
+        rmsd=float(np.average(tuple(float(out.rmsd) for out, _ in batch_outputs), weights=weights)),
+        lddt=float(np.average(tuple(float(out.lddt) for out, _ in batch_outputs), weights=weights)),
     )
 
 
@@ -305,8 +231,8 @@ def compute_sampled_metrics_per_molecule(
     rng: jt.Array,
     batch: batch_lib.JaxBatch,
     *,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    sampling_config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> SampledBatchStats:
     """Samples 3D conformers for a batch and returns per-molecule Kabsch RMSD and lDDT.
 
@@ -333,10 +259,13 @@ def compute_sampled_metrics_per_molecule(
         target=generated,
         atom_mask=batch.atom_mask,
     )
+    mask_f32 = batch.atom_mask.astype(generated.dtype)
     # (batch,) valid atom counts per molecule, clamped to >= 1.
-    atom_counts = jnp.maximum(jnp.sum(batch.atom_mask, axis=-1), 1)
+    atom_counts = jnp.maximum(jnp.sum(mask_f32, axis=-1), 1.0)
+    # (batch, num_atoms) squared coordinate error per atom, zeroed on padded slots.
+    sq_err_per_atom = jnp.sum(jnp.square(aligned - batch.positions), axis=-1) * mask_f32
     # (batch,) per-molecule Kabsch-aligned coordinate RMSD.
-    rmsd = jnp.sqrt(jnp.sum(jnp.square(aligned - batch.positions), axis=(-1, -2)) / atom_counts)
+    rmsd = jnp.sqrt(jnp.sum(sq_err_per_atom, axis=-1) / atom_counts + _DIST_EPS)
     lddt = losses_lib.lddt_per_molecule(
         predicted_positions=generated,
         target_positions=batch.positions,
@@ -346,43 +275,13 @@ def compute_sampled_metrics_per_molecule(
 
 
 @jt.typed
-def compute_sampled_rmsd_per_molecule(
-    params: flax_typing.VariableDict,
-    rng: jt.Array,
-    batch: batch_lib.JaxBatch,
-    *,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
-) -> jt.Float[jt.Array, " batch"]:
-    """Samples 3D conformers for a batch and returns per-molecule Kabsch-aligned RMSD.
-
-    Args:
-        params: Model parameters to evaluate (typically EMA weights).
-        rng: PRNG key for reverse-diffusion sampling.
-        batch: Padded JAX batch containing target coordinates.
-        model_config: Denoiser architecture configuration.
-        sampling_config: Reverse Euler integration configuration.
-
-    Returns:
-        Per-molecule Kabsch-aligned coordinate RMSD in Angstroms.
-    """
-    return compute_sampled_metrics_per_molecule(
-        params,
-        rng,
-        batch,
-        model_config=model_config,
-        sampling_config=sampling_config,
-    ).rmsd
-
-
-@jt.typed
 def evaluate_sampling_rmsd(
     params: flax_typing.VariableDict,
     rng: jt.Array,
     val_batch: batch_lib.JaxBatch,
     *,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    sampling_config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> SamplingMetrics:
     """Generates 3D conformers from Gaussian noise and computes Kabsch RMSD and lDDT.
 
@@ -418,8 +317,8 @@ def evaluate_dataset_sampling(
     eval_source: data_source.DataSource,
     *,
     batch_size: int,
-    model_config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
-    sampling_config: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG,
+    model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
+    sampling_config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> DatasetSamplingMetrics:
     """Evaluates reverse-diffusion conformer generation RMSD and lDDT across a data source.
 
@@ -472,7 +371,7 @@ def evaluate_dataset_sampling(
     )
 
 
-def run_evaluation(config: EvalConfig) -> TestEvaluationReport:
+def run_evaluation(config: config_lib.EvalConfig) -> TestEvaluationReport:
     """Evaluates loss and conformer sampling for a saved run on a test split and writes JSON.
 
     Args:
@@ -487,7 +386,7 @@ def run_evaluation(config: EvalConfig) -> TestEvaluationReport:
     )
     active_params = loaded.checkpoint.ema_params if config.use_ema else loaded.checkpoint.params
     sampling_config = (
-        dataclasses.replace(loaded.sampling_config, num_steps=config.num_sampling_steps)
+        loaded.sampling_config.model_copy(update={"num_steps": config.num_sampling_steps})
         if config.num_sampling_steps is not None
         else loaded.sampling_config
     )
@@ -521,10 +420,10 @@ def run_evaluation(config: EvalConfig) -> TestEvaluationReport:
         sampling_metrics=sampling_metrics,
     )
 
-    output_path = config.output_path or (loaded.run_dir / "test_metrics.json")
+    output_path = config.output_path or (loaded.run_dir / config_lib.ArtifactName.TEST_METRICS)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(dataclasses.asdict(report), indent=2) + "\n",
+        report.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
     _LOGGER.info(
@@ -543,11 +442,11 @@ def run_evaluation(config: EvalConfig) -> TestEvaluationReport:
     return report
 
 
-def _resolve_smiles_inputs(config: SampleSmilesConfig) -> tuple[str, ...]:
+def _resolve_smiles_inputs(config: config_lib.SampleSmilesConfig) -> tuple[str, ...]:
     """Returns the sequence of SMILES strings from either a file or CLI tuple."""
     if config.smiles_file is not None:
         lines = config.smiles_file.read_text(encoding="utf-8").splitlines()
-        cleaned = tuple(line.strip() for line in lines if line.strip())
+        cleaned = tuple(filter(None, map(str.strip, lines)))
         if not cleaned:
             raise ValueError(f"Expected at least one SMILES in {config.smiles_file}.")
         return cleaned
@@ -556,6 +455,7 @@ def _resolve_smiles_inputs(config: SampleSmilesConfig) -> tuple[str, ...]:
     return config.smiles
 
 
+@jt.typed
 def _build_tagged_conformer(
     smiles: str,
     positions: jt.Float[np.ndarray, "max_atoms 3"],
@@ -565,12 +465,12 @@ def _build_tagged_conformer(
 ) -> Chem.Mol:
     """Builds a 3D conformer molecule annotated with its conformer index and PRNG seed."""
     mol = batch_lib.build_conformer_mol(smiles, positions)
-    mol.SetProp("CONFORMER_ID", str(conformer_idx))
-    mol.SetProp("SEED", str(seed))
+    mol.SetProp(batch_lib.SdfProperty.CONFORMER_ID, str(conformer_idx))
+    mol.SetProp(batch_lib.SdfProperty.SEED, str(seed))
     return mol
 
 
-def run_smiles_sampling(config: SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
+def run_smiles_sampling(config: config_lib.SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
     """Generates 3D conformers for a list of SMILES strings and writes them to an SDF file.
 
     Args:
@@ -579,19 +479,19 @@ def run_smiles_sampling(config: SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
     Returns:
         RDKit molecules populated with the sampled 3D conformers.
     """
-    smiles_seq = _resolve_smiles_inputs(config)
+    smiles = _resolve_smiles_inputs(config)
     loaded = checkpoint.load_run_checkpoint(
         config.run_dir,
         checkpoint_name=config.checkpoint_name,
     )
     active_params = loaded.checkpoint.ema_params if config.use_ema else loaded.checkpoint.params
     sampling_config = (
-        dataclasses.replace(loaded.sampling_config, num_steps=config.num_sampling_steps)
+        loaded.sampling_config.model_copy(update={"num_steps": config.num_sampling_steps})
         if config.num_sampling_steps is not None
         else loaded.sampling_config
     )
 
-    jax_batch = batch_lib.collate_smiles(smiles_seq).to_jax()
+    jax_batch = batch_lib.collate_smiles(smiles).to_jax()
     denoiser = model_lib.Denoiser(config=loaded.model_config)
     generated_per_seed = tuple(
         np.asarray(
@@ -609,13 +509,13 @@ def run_smiles_sampling(config: SampleSmilesConfig) -> tuple[Chem.Mol, ...]:
 
     conformer_mols = tuple(
         _build_tagged_conformer(
-            smiles,
+            mol_smiles,
             generated[mol_idx],
             conformer_idx=conf_idx,
             seed=config.seed + conf_idx,
         )
-        for (mol_idx, smiles), (conf_idx, generated) in itertools.product(
-            enumerate(smiles_seq),
+        for (mol_idx, mol_smiles), (conf_idx, generated) in itertools.product(
+            enumerate(smiles),
             enumerate(generated_per_seed),
         )
     )

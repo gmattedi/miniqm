@@ -1,7 +1,8 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the data preparation script and Parquet split layout whenever code changes. -->
+<!-- AGENT NOTICE: Keep this README synchronized with the files and data preparation workflow in this directory whenever code changes. -->
 
-# QM9 Dataset Splits
+# QM9 Dataset Preparation
 
-Downloads the raw QM9 archive (133,885 small organic molecules with up to 29 atoms of H, C, N, O, and F), filters out the 3,054 molecules that fail geometry consistency checks, and writes deterministic 80/10/10 train, validation, and test Parquet files.
+`download_qm9.py` is a data ingestion script that downloads the raw QM9 archive from Figshare and writes the standard DimeNet splits (`train.parquet`, `validation.parquet`, and `test.parquet`):
 
-Each row stores the 1-based GDB9 index, SMILES strings (initial and B3LYP-relaxed), atomic numbers, DFT equilibrium 3D coordinates in Angstroms, Mulliken partial charges, and 19 scalar quantum chemical properties.
+* Filters out the 3,054 uncharacterized molecules, leaving 130,831 characterized entries partitioned into 110,000 training, 10,000 validation, and 10,831 test molecules (seed 42).
+* Parses Fortran-formatted coordinates, atomic numbers, and GDB-17 / relaxed SMILES strings into Zstandard-compressed Parquet tables padded to 29 atoms (`index`, `tag`, `num_atoms`, `smiles`, `smiles_relaxed`, `charges`, and `positions`).

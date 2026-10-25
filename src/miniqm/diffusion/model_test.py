@@ -7,20 +7,19 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.diffusion import geometry, model
 
-_TEST_CONFIG: Final = model.DenoiserConfig(
-    transformer=model.TransformerConfig(hidden_dim=32, num_layers=2, num_heads=4),
+_TEST_CONFIG: Final = config_lib.DenoiserConfig(
+    transformer=config_lib.TransformerConfig(hidden_dim=32, num_layers=2, num_heads=4),
 )
 
 
 @jt.typed
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _ModelTestInputs:
-    """Synthetic 2-molecule padded batch for denoiser tests."""
-
     noisy_positions: jt.Float[jt.Array, "batch num_atoms 3"]
     sigma: jt.Float[jt.Array, " batch"]
     batch: batch_lib.JaxBatch
@@ -28,7 +27,6 @@ class _ModelTestInputs:
 
 @jt.typed
 def _make_dummy_inputs() -> _ModelTestInputs:
-    """Constructs a 2-molecule synthetic batch with padded atom slots for model tests."""
     pos_key, atom_key, bond_key = jax.random.split(jax.random.key(0), 3)
     atom_mask = jnp.array(
         [
@@ -45,6 +43,7 @@ def _make_dummy_inputs() -> _ModelTestInputs:
         atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
         bond_features=jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32),
         atom_mask=atom_mask,
+        positions=jnp.zeros((2, 5, 3), dtype=jnp.float32),
     )
     return _ModelTestInputs(
         noisy_positions=noisy_positions,
@@ -53,7 +52,7 @@ def _make_dummy_inputs() -> _ModelTestInputs:
     )
 
 
-def test_denoiser_outputs_zero_centered_and_masked_coordinates() -> None:
+def test_denoiser_outputs_zero_centered_and_masked_coordinates():
     inputs = _make_dummy_inputs()
     denoiser = model.Denoiser(config=_TEST_CONFIG)
     params = denoiser.init(
@@ -82,7 +81,7 @@ def test_denoiser_outputs_zero_centered_and_masked_coordinates() -> None:
     )
 
 
-def test_denoiser_is_invariant_to_padded_slot_perturbations() -> None:
+def test_denoiser_is_invariant_to_padded_slot_perturbations():
     inputs = _make_dummy_inputs()
     denoiser = model.Denoiser(config=_TEST_CONFIG)
     params = denoiser.init(
@@ -121,7 +120,7 @@ def test_denoiser_is_invariant_to_padded_slot_perturbations() -> None:
     np.testing.assert_allclose(clean_out, perturbed_out, rtol=1e-5, atol=1e-5)
 
 
-def test_denoiser_recovers_centered_input_at_vanishing_noise() -> None:
+def test_denoiser_recovers_centered_input_at_vanishing_noise():
     inputs = _make_dummy_inputs()
     tiny_sigma = jnp.array([1e-7, 1e-7], dtype=jnp.float32)
     denoiser = model.Denoiser(config=_TEST_CONFIG)
@@ -149,7 +148,7 @@ def test_denoiser_recovers_centered_input_at_vanishing_noise() -> None:
     np.testing.assert_allclose(predicted_positions, expected_positions, rtol=1e-5, atol=1e-5)
 
 
-def test_denoiser_gradients_are_finite_and_non_zero() -> None:
+def test_denoiser_gradients_are_finite_and_non_zero():
     inputs = _make_dummy_inputs()
     denoiser = model.Denoiser(config=_TEST_CONFIG)
     params = denoiser.init(
@@ -160,7 +159,6 @@ def test_denoiser_gradients_are_finite_and_non_zero() -> None:
     )
 
     def loss_fn(model_params: flax_typing.VariableDict) -> jt.Array:
-        """Computes mean squared predicted coordinate magnitude for gradient verification."""
         predicted_positions = cast(
             "jt.Array",
             denoiser.apply(
@@ -179,6 +177,6 @@ def test_denoiser_gradients_are_finite_and_non_zero() -> None:
     assert any(float(jnp.linalg.norm(leaf)) > 0.0 for leaf in grad_leaves)
 
 
-def test_transformer_config_rejects_incompatible_hidden_dim() -> None:
+def test_transformer_config_rejects_incompatible_hidden_dim():
     with pytest.raises(ValueError, match="Expected hidden_dim"):
-        model.TransformerConfig(hidden_dim=30, num_layers=1, num_heads=4)
+        config_lib.TransformerConfig(hidden_dim=30, num_layers=1, num_heads=4)

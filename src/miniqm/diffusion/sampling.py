@@ -1,6 +1,5 @@
-"""Reverse-time Karras Euler sampler with stochastic churn for 3D coordinate generation."""
+"""Reverse-time Karras Euler sampler with stochastic noise injection for 3D coordinates."""
 
-import dataclasses
 import functools
 import logging
 from typing import Final, cast
@@ -9,6 +8,7 @@ from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.diffusion import geometry, model
@@ -18,42 +18,8 @@ _LOGGER: Final = logging.getLogger(__name__)
 _SPATIAL_DIMS: Final = 3
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class SamplingConfig:
-    """Reverse integration and stochastic churn parameters for Karras sampling.
-
-    Attributes:
-        noise: Karras EDM noise rollout schedule configuration.
-        num_steps: Number of reverse Euler integration steps.
-        gamma_0: Fractional noise expansion rate during stochastic churn steps.
-        gamma_min: Minimum relative noise level above which stochastic churn is active.
-        noise_scale: Standard deviation multiplier for injected churn Gaussian noise.
-        step_scale: Velocity multiplier for the reverse Euler step size.
-    """
-
-    noise: noise_lib.NoiseConfig = dataclasses.field(default_factory=noise_lib.NoiseConfig)
-    num_steps: int = 40
-    gamma_0: float = 0.8
-    gamma_min: float = 0.1
-    noise_scale: float = 1.003
-    step_scale: float = 1.5
-
-    def __post_init__(self) -> None:
-        if self.num_steps <= 0:
-            raise ValueError(f"Expected positive num_steps, got {self.num_steps}.")
-        if self.gamma_0 < 0.0:
-            raise ValueError(f"Expected non-negative gamma_0, got {self.gamma_0}.")
-        if self.noise_scale < 0.0:
-            raise ValueError(f"Expected non-negative noise_scale, got {self.noise_scale}.")
-        if self.step_scale <= 0.0:
-            raise ValueError(f"Expected positive step_scale, got {self.step_scale}.")
-
-
-DEFAULT_SAMPLING_CONFIG: Final = SamplingConfig()
-
-
 @jt.typed
-def _euler_churn_step(
+def _euler_step(
     key: jt.Array,
     positions: jt.Float[jt.Array, "batch num_atoms 3"],
     *,
@@ -62,19 +28,22 @@ def _euler_churn_step(
     sigma_current: jt.Float[jt.Array, ""],
     sigma_next: jt.Float[jt.Array, ""],
     batch: batch_lib.JaxBatch,
-    config: SamplingConfig,
+    config: config_lib.SamplingConfig,
 ) -> jt.Float[jt.Array, "batch num_atoms 3"]:
-    """Applies one stochastic-churn corrector and Euler predictor step."""
+    """Applies one stochastic noise expansion and reverse Euler integration step."""
     batch_size, _, _ = positions.shape
-    gamma = jnp.where(sigma_current > config.gamma_min, config.gamma_0, 0.0)
+    is_stochastic = sigma_current > config.gamma_min
+    gamma = jnp.where(is_stochastic, config.gamma_0, 0.0)
+    effective_step_scale = jnp.where(is_stochastic, config.step_scale, 1.0)
     sigma_hat = sigma_current * (1.0 + gamma)
-    churn_std = jnp.sqrt(jnp.maximum(jnp.square(sigma_hat) - jnp.square(sigma_current), 0.0)) * (
-        config.noise_scale
+    injected_std = (
+        jnp.sqrt(jnp.maximum(jnp.square(sigma_hat) - jnp.square(sigma_current), 0.0))
+        * config.noise_scale
     )
 
-    churn_noise = jax.random.normal(key, shape=positions.shape, dtype=positions.dtype)
+    injected_noise = jax.random.normal(key, shape=positions.shape, dtype=positions.dtype)
     noisy_positions = geometry.zero_center_of_mass(
-        positions + churn_std * churn_noise,
+        positions + injected_std * injected_noise,
         batch.atom_mask,
     )
 
@@ -92,7 +61,7 @@ def _euler_churn_step(
     # (batch, num_atoms, 3) empirical score direction (x_hat - D(x_hat, sigma_hat)) / sigma_hat.
     score_direction = (noisy_positions - denoised_positions) / sigma_hat
     updated_positions = (
-        noisy_positions + config.step_scale * (sigma_next - sigma_hat) * score_direction
+        noisy_positions + effective_step_scale * (sigma_next - sigma_hat) * score_direction
     )
     return geometry.zero_center_of_mass(updated_positions, batch.atom_mask)
 
@@ -105,11 +74,11 @@ def _integrate_trajectory(
     params: flax_typing.VariableDict,
     *,
     batch: batch_lib.JaxBatch,
-    config: SamplingConfig,
+    config: config_lib.SamplingConfig,
 ) -> jt.Float[jt.Array, "num_frames batch num_atoms 3"]:
     """Integrates the reverse-diffusion coordinate trajectory in a compiled scan loop."""
     batch_size, num_atoms, _ = batch.atom_features.shape
-    schedule = noise_lib.rollout_schedule(config.num_steps, config=config.noise)
+    schedule = noise_lib.rollout_schedule(config.num_steps, config=denoiser.config.noise)
 
     initial_key, loop_key = jax.random.split(key)
     initial_noise = jax.random.normal(
@@ -127,7 +96,7 @@ def _integrate_trajectory(
     ) -> tuple[jt.Float[jt.Array, "batch num_atoms 3"], jt.Float[jt.Array, "batch num_atoms 3"]]:
         """Advances the coordinate trajectory by one reverse diffusion step."""
         step_key, sigma_current, sigma_next = step_inputs
-        next_positions = _euler_churn_step(
+        next_positions = _euler_step(
             step_key,
             positions,
             denoiser=denoiser,
@@ -155,7 +124,7 @@ def sample_trajectory(
     params: flax_typing.VariableDict,
     *,
     batch: batch_lib.JaxBatch,
-    config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
+    config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> jt.Float[jt.Array, "num_frames batch num_atoms 3"]:
     """Generates the full reverse-diffusion coordinate trajectory from Gaussian noise.
 
@@ -164,7 +133,7 @@ def sample_trajectory(
         denoiser: Configured denoiser module.
         params: Initialized model parameters.
         batch: Padded molecular graph features and valid-atom mask.
-        config: Reverse integration and stochastic churn parameters.
+        config: Reverse integration parameters.
 
     Returns:
         Coordinate trajectory from initial noise (index 0) to final denoised coordinates (index -1).
@@ -194,16 +163,16 @@ def sample_coordinates(
     params: flax_typing.VariableDict,
     *,
     batch: batch_lib.JaxBatch,
-    config: SamplingConfig = DEFAULT_SAMPLING_CONFIG,
+    config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> jt.Float[jt.Array, "batch num_atoms 3"]:
-    """Generates 3D molecular coordinates from Gaussian noise via Euler integration with churn.
+    """Generates 3D molecular coordinates from Gaussian noise via reverse Euler integration.
 
     Args:
         key: JAX PRNG key.
         denoiser: Configured denoiser module.
         params: Initialized model parameters.
         batch: Padded molecular graph features and valid-atom mask.
-        config: Reverse integration and stochastic churn parameters.
+        config: Reverse integration parameters.
 
     Returns:
         Sampled zero-centered 3D coordinates with padded slots zeroed.

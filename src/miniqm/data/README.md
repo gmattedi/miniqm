@@ -1,10 +1,10 @@
 <!-- AGENT NOTICE: Keep this README synchronized with the schema, featurization, and batching logic in this directory whenever code changes. -->
 
-# Data & Graph Featurization
+# Data Loading & 2D Molecular Featurization
 
-Reads QM9 Parquet splits into unpadded molecule records, aligns 2D SMILES topology to 3D XYZ atom ordering across parallel worker processes, and collates and caches fixed-shape batches padded to 29 atoms.
+`miniqm.data` is the data-loading and 2D molecular featurization package that reads Parquet splits, aligns RDKit molecular graphs to 3D coordinate atom orderings, and collates padded JAX batches:
 
-* Atom features encode one-hot atomic number (H, C, N, O, F), total degree, formal charge, hybridization, aromaticity, ring membership, and Cahn-Ingold-Prelog R/S chirality.
-* Bond features encode pairwise bond order (none, single, double, triple, aromatic) and ring membership across all atom pairs.
-* SMILES atom order is aligned to the XYZ coordinate order via heavy-atom signature matching with a 3D bond-inference substructure fallback.
-* Coordinates are centered to zero center of mass per molecule before padding, arbitrary SMILES sequences can be collated directly for inference and reconstructed into 3D RDKit conformer molecules, and host NumPy batches convert to JAX PyTree batches on demand.
+* `schema.py` defines `Split`, `Column`, and `Molecule` (unpadded atomic numbers and 3D coordinates in Angstroms) and slices out padding slots when loading Parquet splits.
+* `batch.py` aligns SMILES graphs (`smiles` and `smiles_relaxed`) to the XYZ atom ordering using 3D-validated heavy-atom matching and substructure matching (`rdDetermineBonds`). It perceives 3D Cahn-Ingold-Prelog (`R`/`S`) stereochemistry from the coordinates and encodes 22-dimensional atom features and 6-dimensional bond features.
+* `batch.py` centers 3D coordinates at the origin, collates inference-only SMILES strings (`collate_smiles`), builds explicit-hydrogen RDKit 3D conformers (`build_conformer_mol`), and converts padded NumPy batches (`Batch`) into JAX PyTrees (`JaxBatch`).
+* `data_source.py` provides `DataSource`, which parallelizes featurization across `forkserver` worker processes, caches pre-collated `<split>_collated_<max_atoms>.npz` archives on disk, and yields shuffled or sequential batches.

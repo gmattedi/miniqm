@@ -3,6 +3,7 @@
 from collections.abc import Iterator, Mapping
 import dataclasses
 import datetime as dt
+import enum
 import functools
 import json
 import logging
@@ -21,13 +22,13 @@ import optax
 from rich import progress
 import tensorboardX
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.data import data_source
 from miniqm.diffusion import losses as losses_lib
 from miniqm.diffusion import model as model_lib
 from miniqm.diffusion import noise as noise_lib
-from miniqm.diffusion import sampling as sampling_lib
 from miniqm.training import checkpoint
 from miniqm.training import eval as eval_lib
 
@@ -37,125 +38,19 @@ _BYTES_PER_MB: Final = 1024 * 1024
 _TABULATE_WIDTH: Final = 100
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class TrainConfig:
-    """Hyperparameters for model architecture, diffusion loss, and Optax optimization.
+class MetricSplit(enum.StrEnum):
+    """Split identifiers written to TensorBoard and JSONL metric logs."""
 
-    Attributes:
-        model: Denoiser architecture and EDM noise schedule configuration.
-        loss: Diffusion loss weights and distance cutoff configuration.
-        learning_rate: Peak learning rate after linear warmup.
-        warmup_steps: Number of linear warmup steps from zero to peak learning rate.
-        decay_steps: Total steps for the warmup + cosine decay schedule.
-        min_learning_rate: Terminal learning rate at the end of cosine decay.
-        weight_decay: AdamW decoupled weight decay coefficient.
-        max_grad_norm: Global gradient norm clipping threshold.
-        ema_decay: Exponential moving average decay factor for evaluation weights.
-    """
-
-    model: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG
-    loss: losses_lib.LossConfig = losses_lib.DEFAULT_LOSS_CONFIG
-    learning_rate: float = 3e-4
-    warmup_steps: int = 1_000
-    decay_steps: int = 100_000
-    min_learning_rate: float = 1e-5
-    weight_decay: float = 1e-4
-    max_grad_norm: float = 1.0
-    ema_decay: float = 0.999
-
-    def __post_init__(self) -> None:
-        if self.learning_rate <= 0.0:
-            raise ValueError(f"Expected positive learning_rate, got {self.learning_rate}.")
-        if not (0.0 <= self.min_learning_rate <= self.learning_rate):
-            raise ValueError(
-                f"Expected 0 <= min_learning_rate <= learning_rate, got "
-                f"min_learning_rate={self.min_learning_rate}, learning_rate={self.learning_rate}."
-            )
-        if self.warmup_steps < 0:
-            raise ValueError(f"Expected non-negative warmup_steps, got {self.warmup_steps}.")
-        if self.decay_steps <= self.warmup_steps:
-            raise ValueError(
-                f"Expected decay_steps ({self.decay_steps}) > warmup_steps ({self.warmup_steps})."
-            )
-        if self.weight_decay < 0.0:
-            raise ValueError(f"Expected non-negative weight_decay, got {self.weight_decay}.")
-        if self.max_grad_norm <= 0.0:
-            raise ValueError(f"Expected positive max_grad_norm, got {self.max_grad_norm}.")
-        if not (0.0 <= self.ema_decay <= 1.0):
-            raise ValueError(f"Expected ema_decay in [0, 1], got {self.ema_decay}.")
-
-
-DEFAULT_TRAIN_CONFIG: Final = TrainConfig()
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class RunConfig:
-    """End-to-end configuration for the training, evaluation, and checkpointing loop.
-
-    Attributes:
-        train_path: Path to the training split Parquet file.
-        val_path: Path to the validation split Parquet file.
-        run_dir: Output directory for checkpoints, TensorBoard events, and JSONL metrics.
-        train: Model, loss, and optimizer hyperparameter configuration.
-        sampling: Reverse-diffusion conformer sampling configuration for validation.
-        batch_size: Number of molecules per training and validation batch.
-        num_steps: Total number of optimization steps to run.
-        log_every: Step interval between training scalar log entries.
-        eval_every: Step interval between full validation loss evaluations and checkpoints.
-        sample_every: Step interval between reverse-diffusion conformer RMSD evaluations.
-        max_train_molecules: Optional cap on the number of loaded training molecules.
-        max_val_molecules: Optional cap on the number of loaded validation molecules.
-        sample_batch_size: Number of validation molecules used for periodic conformer sampling.
-        num_devices: Number of logical XLA CPU devices to use for batch sharding.
-        seed: Base random seed for parameter initialization, batch shuffling, and evaluation.
-    """
-
-    train_path: pathlib.Path = pathlib.Path("data/train.parquet")
-    val_path: pathlib.Path = pathlib.Path("data/validation.parquet")
-    run_dir: pathlib.Path = pathlib.Path("runs/qm9_default")
-    train: TrainConfig = DEFAULT_TRAIN_CONFIG
-    sampling: sampling_lib.SamplingConfig = sampling_lib.DEFAULT_SAMPLING_CONFIG
-    batch_size: int = 64
-    num_steps: int = 50_000
-    log_every: int = 50
-    eval_every: int = 500
-    sample_every: int = 1_000
-    max_train_molecules: int | None = None
-    max_val_molecules: int | None = 512
-    sample_batch_size: int = 32
-    num_devices: int = 8
-    seed: int = 0
-
-    def __post_init__(self) -> None:
-        if self.batch_size <= 0:
-            raise ValueError(f"Expected positive batch_size, got {self.batch_size}.")
-        if self.num_steps <= 0:
-            raise ValueError(f"Expected positive num_steps, got {self.num_steps}.")
-        if self.log_every <= 0:
-            raise ValueError(f"Expected positive log_every, got {self.log_every}.")
-        if self.eval_every <= 0:
-            raise ValueError(f"Expected positive eval_every, got {self.eval_every}.")
-        if self.sample_every <= 0:
-            raise ValueError(f"Expected positive sample_every, got {self.sample_every}.")
-        if self.sample_batch_size <= 0:
-            raise ValueError(f"Expected positive sample_batch_size, got {self.sample_batch_size}.")
-        if self.num_devices <= 0:
-            raise ValueError(f"Expected positive num_devices, got {self.num_devices}.")
+    TRAIN = "train"
+    VAL = "val"
+    VAL_SAMPLE = "val_sample"
 
 
 @jax.tree_util.register_dataclass
 @jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class TrainState:
-    """Mutable training state carried across optimization steps as a JAX PyTree.
-
-    Attributes:
-        step: Current optimization step counter.
-        params: Active model parameters updated by the optimizer.
-        ema_params: Exponential moving average of model parameters for evaluation/sampling.
-        opt_state: Optax optimizer state.
-        rng: PRNG key advanced at each training step.
-    """
+    """Training state PyTree carried across optimization steps."""
 
     step: jt.Int[jt.Array, ""]
     params: flax_typing.VariableDict
@@ -168,14 +63,7 @@ class TrainState:
 @jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class TrainStepOutput:
-    """Result of a single optimization step.
-
-    Attributes:
-        state: Updated training state.
-        loss_output: Total loss and diagnostic breakdown from the forward pass.
-        grad_norm: Global L2 norm of the unclipped parameter gradients.
-        learning_rate: Learning rate applied at the current step.
-    """
+    """Updated training state and diagnostic scalars from a single optimization step."""
 
     state: TrainState
     loss_output: losses_lib.LossOutput
@@ -183,7 +71,18 @@ class TrainStepOutput:
     learning_rate: jt.Float[jt.Array, ""]
 
 
-def learning_rate_schedule(config: TrainConfig = DEFAULT_TRAIN_CONFIG) -> optax.Schedule:
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _DeviceShardings:
+    """Primary device and mesh shardings for replicated state and data-parallel batches."""
+
+    primary_device: jax.Device
+    replicated_sharding: jax_sharding.NamedSharding
+    batch_sharding: jax_sharding.NamedSharding
+
+
+def learning_rate_schedule(
+    config: config_lib.TrainConfig = config_lib.DEFAULT_TRAIN_CONFIG,
+) -> optax.Schedule:
     """Builds the linear warmup and cosine decay learning rate schedule.
 
     Args:
@@ -201,7 +100,9 @@ def learning_rate_schedule(config: TrainConfig = DEFAULT_TRAIN_CONFIG) -> optax.
     )
 
 
-def build_optimizer(config: TrainConfig = DEFAULT_TRAIN_CONFIG) -> optax.GradientTransformation:
+def build_optimizer(
+    config: config_lib.TrainConfig = config_lib.DEFAULT_TRAIN_CONFIG,
+) -> optax.GradientTransformation:
     """Constructs the global-norm-clipped AdamW optimizer.
 
     Args:
@@ -224,7 +125,7 @@ def init_train_state(
     rng: jt.Array,
     dummy_batch: batch_lib.JaxBatch,
     *,
-    config: TrainConfig = DEFAULT_TRAIN_CONFIG,
+    config: config_lib.TrainConfig = config_lib.DEFAULT_TRAIN_CONFIG,
 ) -> TrainState:
     """Initializes model parameters, EMA weights, and optimizer state from a sample batch.
 
@@ -264,7 +165,7 @@ def train_step(
     state: TrainState,
     batch: batch_lib.JaxBatch,
     *,
-    config: TrainConfig = DEFAULT_TRAIN_CONFIG,
+    config: config_lib.TrainConfig = config_lib.DEFAULT_TRAIN_CONFIG,
 ) -> TrainStepOutput:
     """Executes one forward/backward diffusion training step and updates parameters and EMA.
 
@@ -284,6 +185,7 @@ def train_step(
         config=config.model.noise,
     )
 
+    @jt.typed
     def _loss_fn(
         params: flax_typing.VariableDict,
     ) -> tuple[jt.Float[jt.Array, ""], losses_lib.LossOutput]:
@@ -327,34 +229,6 @@ def train_step(
     )
 
 
-@jt.typed
-def eval_step(
-    params: flax_typing.VariableDict,
-    rng: jt.Array,
-    batch: batch_lib.JaxBatch,
-    *,
-    config: TrainConfig = DEFAULT_TRAIN_CONFIG,
-) -> losses_lib.LossOutput:
-    """Evaluates the diffusion loss on a batch without updating parameters.
-
-    Args:
-        params: Model parameters (typically EMA weights).
-        rng: PRNG key for random 3D rotation augmentation and noise sampling.
-        batch: Padded JAX batch with ground-truth 3D coordinates and molecular graph features.
-        config: Training hyperparameter configuration.
-
-    Returns:
-        Diffusion loss breakdown on the randomly rotated and corrupted batch.
-    """
-    return eval_lib.eval_step(
-        params,
-        rng,
-        batch,
-        model_config=config.model,
-        loss_config=config.loss,
-    )
-
-
 def count_parameters(params: flax_typing.VariableDict) -> int:
     """Returns the total number of scalar parameters in a variable dictionary."""
     return sum(int(leaf.size) for leaf in jax.tree.leaves(params))
@@ -380,7 +254,7 @@ def format_parameter_summary(params: flax_typing.VariableDict) -> str:
 def tabulate_model(
     dummy_batch: batch_lib.JaxBatch,
     *,
-    config: model_lib.DenoiserConfig = model_lib.DEFAULT_DENOISER_CONFIG,
+    config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
     depth: int = 1,
 ) -> str:
     """Renders a Flax Linen module summary table for the denoiser.
@@ -414,7 +288,7 @@ def _jit_train_step(
     state: TrainState,
     batch: batch_lib.JaxBatch,
     *,
-    config: TrainConfig = DEFAULT_TRAIN_CONFIG,
+    config: config_lib.TrainConfig = config_lib.DEFAULT_TRAIN_CONFIG,
 ) -> TrainStepOutput:
     """Executes one compiled diffusion training step."""
     return train_step(state, batch, config=config)
@@ -437,12 +311,13 @@ def configure_cpu_devices(num_devices: int) -> None:
 
 
 def _build_device_shardings(
+    *,
     num_devices: int,
     effective_batch_size: int,
-) -> tuple[jax.Device, jax_sharding.NamedSharding, jax_sharding.NamedSharding]:
+) -> _DeviceShardings:
     """Configures CPU devices and builds replicated state and batch shardings."""
     configure_cpu_devices(num_devices)
-    devices = jax.devices()
+    devices = jax.devices()[:num_devices]
     active_devices = tuple(devices[: math.gcd(len(devices), effective_batch_size)])
     mesh = jax_sharding.Mesh(active_devices, ("batch",))
     replicated_sharding = jax_sharding.NamedSharding(mesh, jax_sharding.PartitionSpec())
@@ -454,7 +329,11 @@ def _build_device_shardings(
         len(active_devices),
         ", ".join(str(device) for device in active_devices),
     )
-    return devices[0], replicated_sharding, batch_sharding
+    return _DeviceShardings(
+        primary_device=devices[0],
+        replicated_sharding=replicated_sharding,
+        batch_sharding=batch_sharding,
+    )
 
 
 def _infinite_train_batches(
@@ -488,40 +367,37 @@ def _write_scalars(
     metrics_path: pathlib.Path,
     *,
     step: int,
-    split: str,
-    scalars: Mapping[str, float],
+    split: MetricSplit,
+    scalar_by_name: Mapping[str, float],
 ) -> None:
     """Logs scalar metrics to both TensorBoardX and the JSONL metrics file."""
-    for name, value in scalars.items():
+    for name, value in scalar_by_name.items():
         writer.add_scalar(f"{split}/{name}", value, global_step=step)
     writer.flush()
-    record = {"step": step, "split": split, **scalars}
+    record = {"step": step, "split": str(split), **scalar_by_name}
     with metrics_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
 
 
-def write_run_config(config: RunConfig) -> None:
+def write_run_config(config: config_lib.RunConfig) -> None:
     """Writes the serialized run configuration to the run directory.
 
     Args:
         config: End-to-end training and evaluation configuration.
     """
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    (config.run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    config_dict = dataclasses.asdict(config)
-    for path_key in ("train_path", "val_path", "run_dir"):
-        config_dict[path_key] = str(config_dict[path_key])
-    (config.run_dir / "config.json").write_text(
-        json.dumps(config_dict, indent=2) + "\n",
+    (config.run_dir / config_lib.ArtifactName.CHECKPOINTS_DIR).mkdir(parents=True, exist_ok=True)
+    (config.run_dir / config_lib.ArtifactName.CONFIG).write_text(
+        config.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
 
 
-def _init_timestamped_run_dir(config: RunConfig) -> pathlib.Path:
+def _init_timestamped_run_dir(config: config_lib.RunConfig) -> pathlib.Path:
     """Creates a timestamped run subdirectory and writes the serialized configuration."""
     timestamp = dt.datetime.now(tz=dt.UTC).strftime("%Y%m%d_%H%M%S")
     active_run_dir = config.run_dir / timestamp
-    write_run_config(dataclasses.replace(config, run_dir=active_run_dir))
+    write_run_config(config.model_copy(update={"run_dir": active_run_dir}))
     _LOGGER.info("Saving run artifacts to %s", active_run_dir)
     return active_run_dir
 
@@ -545,12 +421,12 @@ def _save_state_checkpoint(
     primary_device: jax.Device,
 ) -> None:
     """Serializes the current training state onto disk via the primary device."""
-    ckpt_payload = checkpoint.Checkpoint(
+    checkpoint_data = checkpoint.Checkpoint(
         step=int(state.step),
         params=jax.device_put(state.params, primary_device),
         ema_params=jax.device_put(state.ema_params, primary_device),
     )
-    checkpoint.save_checkpoint(path, ckpt_payload)
+    checkpoint.save_checkpoint(path, checkpoint_data)
 
 
 def _save_interrupted_checkpoints(
@@ -561,8 +437,8 @@ def _save_interrupted_checkpoints(
     num_steps: int,
 ) -> None:
     """Persists the latest (and fallback best) checkpoint when training is interrupted."""
-    latest_path = checkpoints_dir / "latest.msgpack"
-    best_path = checkpoints_dir / "best.msgpack"
+    latest_path = checkpoints_dir / config_lib.CheckpointName.LATEST
+    best_path = checkpoints_dir / config_lib.CheckpointName.BEST
     _save_state_checkpoint(latest_path, state, primary_device)
     if not best_path.is_file():
         _save_state_checkpoint(best_path, state, primary_device)
@@ -574,7 +450,57 @@ def _save_interrupted_checkpoints(
     )
 
 
-def run_training(config: RunConfig) -> TrainState:
+def _log_train_step(
+    writer: tensorboardX.SummaryWriter,
+    metrics_path: pathlib.Path,
+    progress_bar: progress.Progress,
+    task_id: progress.TaskID,
+    *,
+    step_idx: int,
+    num_steps: int,
+    step_out: TrainStepOutput,
+    elapsed_s: float,
+) -> None:
+    """Logs training metrics to TensorBoard, JSONL, the progress bar, and the logger."""
+    loss_out = step_out.loss_output
+    total_loss = float(loss_out.total_loss)
+    rmsd = float(loss_out.rmsd)
+    lddt = float(loss_out.lddt)
+    grad_norm = float(step_out.grad_norm)
+    learning_rate = float(step_out.learning_rate)
+    _write_scalars(
+        writer,
+        metrics_path,
+        step=step_idx,
+        split=MetricSplit.TRAIN,
+        scalar_by_name={
+            "total_loss": total_loss,
+            "aligned_mse_loss": float(loss_out.aligned_mse_loss),
+            "distance_loss": float(loss_out.distance_loss),
+            "rmsd": rmsd,
+            "lddt": lddt,
+            "grad_norm": grad_norm,
+            "learning_rate": learning_rate,
+            "wall_time_s": elapsed_s,
+        },
+    )
+    progress_bar.update(
+        task_id,
+        metrics=(f"loss={total_loss:.4f} rmsd={rmsd:.3f}A lddt={lddt:.3f} lr={learning_rate:.2e}"),
+    )
+    _LOGGER.info(
+        "step=%d/%d train_loss=%.4f rmsd=%.3f A lddt=%.3f grad_norm=%.2f lr=%.2e",
+        step_idx,
+        num_steps,
+        total_loss,
+        rmsd,
+        lddt,
+        grad_norm,
+        learning_rate,
+    )
+
+
+def run_training(config: config_lib.RunConfig) -> TrainState:
     """Executes the full training, validation, sampling, and checkpointing loop.
 
     Args:
@@ -584,8 +510,8 @@ def run_training(config: RunConfig) -> TrainState:
         Final training state after all configured optimization steps.
     """
     active_run_dir = _init_timestamped_run_dir(config)
-    checkpoints_dir = active_run_dir / "checkpoints"
-    metrics_path = active_run_dir / "metrics.jsonl"
+    checkpoints_dir = active_run_dir / config_lib.ArtifactName.CHECKPOINTS_DIR
+    metrics_path = active_run_dir / config_lib.ArtifactName.METRICS
 
     configure_cpu_devices(config.num_devices)
     train_source = data_source.DataSource(
@@ -596,9 +522,9 @@ def run_training(config: RunConfig) -> TrainState:
         config.val_path,
         max_molecules=config.max_val_molecules,
     )
-    primary_device, replicated_sharding, batch_sharding = _build_device_shardings(
-        config.num_devices,
-        min(config.batch_size, len(train_source)),
+    shardings = _build_device_shardings(
+        num_devices=config.num_devices,
+        effective_batch_size=min(config.batch_size, len(train_source)),
     )
 
     sample_val_batch = next(
@@ -622,17 +548,17 @@ def run_training(config: RunConfig) -> TrainState:
         tabulate_model(unsharded_first_batch, config=config.train.model),
     )
 
-    state = cast("TrainState", jax.device_put(state, replicated_sharding))
+    state = cast("TrainState", jax.device_put(state, shardings.replicated_sharding))
     batch_iter = _infinite_train_batches(
         train_source,
         batch_size=config.batch_size,
         seed=config.seed,
-        sharding=batch_sharding,
+        sharding=shardings.batch_sharding,
     )
     first_batch = next(batch_iter)
 
     best_sampled_lddt = -1.0
-    start_time = time.monotonic()
+    start_time = time.perf_counter()
 
     with (
         tensorboardX.SummaryWriter(logdir=str(active_run_dir)) as writer,
@@ -650,46 +576,19 @@ def run_training(config: RunConfig) -> TrainState:
                 progress_bar.advance(task_id)
 
                 if step_idx % config.log_every == 0 or step_idx in {1, config.num_steps}:
-                    elapsed_s = time.monotonic() - start_time
-                    train_scalars = {
-                        "total_loss": float(step_out.loss_output.total_loss),
-                        "aligned_mse_loss": float(step_out.loss_output.aligned_mse_loss),
-                        "distance_loss": float(step_out.loss_output.distance_loss),
-                        "rmsd": float(step_out.loss_output.rmsd),
-                        "lddt": float(step_out.loss_output.lddt),
-                        "grad_norm": float(step_out.grad_norm),
-                        "learning_rate": float(step_out.learning_rate),
-                        "wall_time_s": elapsed_s,
-                    }
-                    _write_scalars(
+                    _log_train_step(
                         writer,
                         metrics_path,
-                        step=step_idx,
-                        split="train",
-                        scalars=train_scalars,
-                    )
-                    progress_bar.update(
+                        progress_bar,
                         task_id,
-                        metrics=(
-                            f"loss={train_scalars['total_loss']:.4f} "
-                            f"rmsd={train_scalars['rmsd']:.3f}A "
-                            f"lddt={train_scalars['lddt']:.3f} "
-                            f"lr={train_scalars['learning_rate']:.2e}"
-                        ),
-                    )
-                    _LOGGER.info(
-                        "step=%d/%d train_loss=%.4f rmsd=%.3f A lddt=%.3f grad_norm=%.2f lr=%.2e",
-                        step_idx,
-                        config.num_steps,
-                        train_scalars["total_loss"],
-                        train_scalars["rmsd"],
-                        train_scalars["lddt"],
-                        train_scalars["grad_norm"],
-                        train_scalars["learning_rate"],
+                        step_idx=step_idx,
+                        num_steps=config.num_steps,
+                        step_out=step_out,
+                        elapsed_s=time.perf_counter() - start_time,
                     )
 
                 if step_idx % config.eval_every == 0 or step_idx == config.num_steps:
-                    single_device_ema = jax.device_put(state.ema_params, primary_device)
+                    single_device_ema = jax.device_put(state.ema_params, shardings.primary_device)
                     val_metrics = eval_lib.evaluate_loss(
                         single_device_ema,
                         eval_rng,
@@ -702,13 +601,13 @@ def run_training(config: RunConfig) -> TrainState:
                         writer,
                         metrics_path,
                         step=step_idx,
-                        split="val",
-                        scalars=dataclasses.asdict(val_metrics),
+                        split=MetricSplit.VAL,
+                        scalar_by_name=val_metrics.model_dump(),
                     )
                     _save_state_checkpoint(
-                        checkpoints_dir / "latest.msgpack",
+                        checkpoints_dir / config_lib.CheckpointName.LATEST,
                         state,
-                        primary_device,
+                        shardings.primary_device,
                     )
                     _LOGGER.info(
                         "step=%d/%d val_loss=%.4f val_rmsd=%.3f A val_lddt=%.3f",
@@ -720,7 +619,7 @@ def run_training(config: RunConfig) -> TrainState:
                     )
 
                 if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
-                    single_device_ema = jax.device_put(state.ema_params, primary_device)
+                    single_device_ema = jax.device_put(state.ema_params, shardings.primary_device)
                     sampling_metrics = eval_lib.evaluate_sampling_rmsd(
                         single_device_ema,
                         sample_rng,
@@ -732,15 +631,15 @@ def run_training(config: RunConfig) -> TrainState:
                         writer,
                         metrics_path,
                         step=step_idx,
-                        split="val_sample",
-                        scalars=dataclasses.asdict(sampling_metrics),
+                        split=MetricSplit.VAL_SAMPLE,
+                        scalar_by_name=sampling_metrics.model_dump(),
                     )
                     if sampling_metrics.sampled_lddt_mean > best_sampled_lddt:
                         best_sampled_lddt = sampling_metrics.sampled_lddt_mean
                         _save_state_checkpoint(
-                            checkpoints_dir / "best.msgpack",
+                            checkpoints_dir / config_lib.CheckpointName.BEST,
                             state,
-                            primary_device,
+                            shardings.primary_device,
                         )
                     _LOGGER.info(
                         "step=%d/%d sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f (best=%.3f)",
@@ -757,7 +656,7 @@ def run_training(config: RunConfig) -> TrainState:
             _save_interrupted_checkpoints(
                 checkpoints_dir,
                 state,
-                primary_device,
+                shardings.primary_device,
                 num_steps=config.num_steps,
             )
 

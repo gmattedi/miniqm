@@ -11,7 +11,6 @@ from miniqm.diffusion import geometry
 def _tetrahedral_signed_volume(
     positions: jt.Float[jax.Array, "*batch num_atoms 3"],
 ) -> jt.Float[jax.Array, "*batch"]:
-    """Computes the signed scalar triple product of the first four atoms."""
     edge_a = positions[..., 1, :] - positions[..., 0, :]
     edge_b = positions[..., 2, :] - positions[..., 0, :]
     edge_c = positions[..., 3, :] - positions[..., 0, :]
@@ -56,12 +55,12 @@ def test_zero_center_of_mass(
     positions: jt.Float[jax.Array, "num_atoms 3"],
     atom_mask: jt.Bool[jax.Array, "*batch num_atoms"],
     expected_positions: jt.Float[jax.Array, "num_atoms 3"],
-) -> None:
+):
     centered_positions = geometry.zero_center_of_mass(positions, atom_mask)
     np.testing.assert_allclose(centered_positions, expected_positions, atol=1e-6)
 
 
-def test_random_rotation_preserves_distances_and_chirality() -> None:
+def test_random_rotation_preserves_distances_and_chirality():
     chiral_coords = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -101,7 +100,7 @@ def test_random_rotation_preserves_distances_and_chirality() -> None:
     assert not jnp.allclose(rotated_positions[0], rotated_positions[1])
 
 
-def test_kabsch_align_recovers_rotated_and_translated_coordinates() -> None:
+def test_kabsch_align_recovers_rotated_and_translated_coordinates():
     raw_coords = jnp.array(
         [
             [
@@ -132,7 +131,13 @@ def test_kabsch_align_recovers_rotated_and_translated_coordinates() -> None:
     pad_garbage = jnp.array(
         [
             [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [9.0, 8.0, 7.0]],
-            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [-5.0, 4.0, 3.0]],
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [-5.0, 4.0, 3.0],
+            ],
         ],
         dtype=jnp.float32,
     )
@@ -148,7 +153,7 @@ def test_kabsch_align_recovers_rotated_and_translated_coordinates() -> None:
     np.testing.assert_allclose(aligned_positions, reference, atol=1e-5)
 
 
-def test_kabsch_align_preserves_chirality_against_mirror_reflection() -> None:
+def test_kabsch_align_preserves_chirality_against_mirror_reflection():
     chiral_coords = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -176,7 +181,7 @@ def test_kabsch_align_preserves_chirality_against_mirror_reflection() -> None:
     assert float(jnp.sum((aligned_positions - reference) ** 2)) > 1.0
 
 
-def test_kabsch_align_gradients_flow_and_match_both_alignment_directions() -> None:
+def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
     ground_truth = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -199,7 +204,6 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions() -> No
     def loss_align_pred_to_gt(
         pred: jt.Float[jax.Array, "num_atoms 3"],
     ) -> jt.Float[jax.Array, ""]:
-        """Computes squared error when aligning predicted coordinates onto ground truth."""
         aligned_pred = geometry.kabsch_align(
             reference=ground_truth,
             target=pred,
@@ -211,7 +215,6 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions() -> No
     def loss_align_gt_to_pred(
         pred: jt.Float[jax.Array, "num_atoms 3"],
     ) -> jt.Float[jax.Array, ""]:
-        """Computes squared error when aligning ground truth onto predicted coordinates."""
         aligned_gt = geometry.kabsch_align(
             reference=pred,
             target=ground_truth,

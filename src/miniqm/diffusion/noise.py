@@ -1,43 +1,19 @@
 """Karras EDM noise schedule, preconditioning factors, and forward coordinate corruption."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable
 import dataclasses
-from typing import Final
 
 import jax
 import jax.numpy as jnp
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.diffusion import geometry
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class NoiseConfig:
-    """Karras EDM noise distribution and rollout schedule parameters.
-
-    Attributes:
-        sigma_data: Empirical coordinate standard deviation in Angstroms across zero-centered QM9.
-        s_min: Minimum relative noise multiplier at the end of reverse rollout.
-        s_max: Maximum relative noise multiplier at the start of reverse rollout.
-        rho: Polynomial exponent controlling step spacing in the Karras schedule.
-        log_sigma_mean: Mean of the log-normal training noise distribution.
-        log_sigma_std: Standard deviation of the log-normal training noise distribution.
-    """
-
-    sigma_data: float = 1.2
-    s_min: float = 4e-4
-    s_max: float = 80.0
-    rho: int = 7
-    log_sigma_mean: float = -1.2
-    log_sigma_std: float = 1.5
-
-
-DEFAULT_NOISE_CONFIG: Final = NoiseConfig()
-
-
 @jax.tree_util.register_dataclass
 @jt.typed
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class PreconditioningFactors:
     """Karras EDM input/output scaling coefficients and loss weight for a given noise level."""
 
@@ -49,7 +25,7 @@ class PreconditioningFactors:
 
 @jax.tree_util.register_dataclass
 @jt.typed
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class NoisySample:
     """Randomly rotated target coordinates paired with Gaussian-corrupted noisy coordinates."""
 
@@ -62,7 +38,7 @@ class NoisySample:
 def preconditioning_factors(
     sigma: jt.Float[jt.Array, "*batch"],
     *,
-    config: NoiseConfig = DEFAULT_NOISE_CONFIG,
+    config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> PreconditioningFactors:
     """Computes Karras EDM preconditioning coefficients and MSE loss weights.
 
@@ -88,19 +64,19 @@ def preconditioning_factors(
 def rollout_schedule(
     num_steps: int,
     *,
-    config: NoiseConfig = DEFAULT_NOISE_CONFIG,
+    config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> jt.Float[jt.Array, " num_levels"]:
-    """Builds a decreasing Karras polynomial noise schedule over num_steps intervals.
+    """Builds a decreasing Karras polynomial noise schedule.
 
     Args:
-        num_steps: Number of reverse integration steps (produces num_steps + 1 levels).
+        num_steps: Number of reverse integration steps.
         config: Noise schedule and data scale configuration.
 
     Returns:
-        Monotonically decreasing noise levels from sigma_data * s_max to sigma_data * s_min.
+        Monotonically decreasing noise levels from maximum to minimum sigma.
 
     Raises:
-        ValueError: If num_steps is not positive.
+        ValueError: If the step count is not positive.
     """
     if num_steps <= 0:
         raise ValueError(f"Expected positive num_steps, got {num_steps}.")
@@ -117,9 +93,9 @@ def rollout_schedule(
 @jt.typed
 def sample_train_sigmas(
     key: jt.Array,
-    shape: Sequence[int],
+    shape: Iterable[int],
     *,
-    config: NoiseConfig = DEFAULT_NOISE_CONFIG,
+    config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> jt.Float[jt.Array, "..."]:
     """Samples training noise standard deviations from a log-normal distribution.
 
@@ -141,14 +117,14 @@ def make_noisy_sample(
     positions: jt.Float[jt.Array, "*batch num_atoms 3"],
     atom_mask: jt.Bool[jt.Array, "*batch num_atoms"],
     *,
-    config: NoiseConfig = DEFAULT_NOISE_CONFIG,
+    config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> NoisySample:
     """Rotates ground-truth coordinates randomly and corrupts valid atoms with Gaussian noise.
 
     Args:
         key: JAX PRNG key.
         positions: Clean atomic coordinates.
-        atom_mask: Boolean mask indicating valid atoms.
+        atom_mask: Valid-atom mask.
         config: Noise distribution configuration.
 
     Returns:

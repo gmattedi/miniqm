@@ -1,6 +1,5 @@
 """Karras EDM 3D molecular coordinate Transformer denoiser."""
 
-import dataclasses
 import logging
 from typing import Final, override
 
@@ -8,6 +7,7 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.diffusion import geometry
@@ -21,99 +21,10 @@ _MASK_FILL_VALUE: Final = -1e9
 _DIST_EPS: Final = 1e-8
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class TransformerConfig:
-    """Architecture hyperparameters for the pair-biased Transformer stack.
-
-    Attributes:
-        hidden_dim: Per-atom token embedding dimension.
-        num_layers: Number of stacked pair-biased Transformer blocks.
-        num_heads: Number of attention heads per Transformer block.
-        mlp_factor: Expansion ratio of the SwiGLU feed-forward hidden dimension.
-    """
-
-    hidden_dim: int = 128
-    num_layers: int = 4
-    num_heads: int = 4
-    mlp_factor: int = 4
-
-    def __post_init__(self) -> None:
-        if self.hidden_dim % self.num_heads != 0 or self.hidden_dim % 2 != 0:
-            raise ValueError(
-                f"Expected hidden_dim ({self.hidden_dim}) divisible by "
-                f"num_heads ({self.num_heads}) and 2."
-            )
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class FourierNoiseConfig:
-    """Sinusoidal Fourier embedding parameters for log-noise conditioning.
-
-    Attributes:
-        log_sigma_scale: Pre-multiplier applied to the log-noise ratio before embedding.
-        max_period: Maximum wavelength controlling minimum sinusoidal frequency.
-    """
-
-    log_sigma_scale: float = 0.25
-    max_period: float = 100.0
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class DenoiserConfig:
-    """Complete configuration for the 3D molecular coordinate denoiser.
-
-    Attributes:
-        transformer: Pair-biased Transformer architecture hyperparameters.
-        fourier: Sinusoidal Fourier log-noise embedding configuration.
-        noise: Karras EDM noise distribution and preconditioning parameters.
-    """
-
-    transformer: TransformerConfig = dataclasses.field(default_factory=TransformerConfig)
-    fourier: FourierNoiseConfig = dataclasses.field(default_factory=FourierNoiseConfig)
-    noise: noise_lib.NoiseConfig = dataclasses.field(default_factory=noise_lib.NoiseConfig)
-
-
-DEFAULT_DENOISER_CONFIG: Final = DenoiserConfig()
-
-
-@jt.typed
-def _fourier_noise_embedding(
-    sigma: jt.Float[jt.Array, " batch"],
-    *,
-    embedding_dim: int,
-    sigma_data: float,
-    config: FourierNoiseConfig,
-) -> jt.Float[jt.Array, "batch {embedding_dim}"]:
-    """Embeds scaled log-noise levels using sinusoidal log-spaced frequencies."""
-    half_dim = embedding_dim // 2
-    c_noise = config.log_sigma_scale * jnp.log(sigma / sigma_data)
-    freq_exponents = jnp.linspace(0.0, 1.0, half_dim, dtype=jnp.float32)
-    frequencies = jnp.exp(-jnp.log(config.max_period) * freq_exponents)
-    # (batch, half_dim) outer product of c_noise (batch, 1) and frequencies (1, half_dim).
-    angles = c_noise[:, None] * frequencies[None, :]
-    return jnp.concatenate((jnp.sin(angles), jnp.cos(angles)), axis=-1)
-
-
-@jt.typed
-def _pairwise_geometry_features(
-    scaled_positions: jt.Float[jt.Array, "batch num_atoms 3"],
-    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
-    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
-) -> jt.Float[jt.Array, "batch num_atoms num_atoms num_pair_features"]:
-    """Combines 2D bond features with 3D pairwise displacements and Euclidean distances."""
-    # (batch, num_atoms, num_atoms, 1) pairwise valid-atom mask.
-    pair_mask = (atom_mask[:, :, None] & atom_mask[:, None, :])[..., None]
-    # (batch, num_atoms, num_atoms, 3) pairwise displacement vectors x_i - x_j.
-    offsets = scaled_positions[:, :, None, :] - scaled_positions[:, None, :, :]
-    # (batch, num_atoms, num_atoms, 1) pairwise Euclidean distances ||x_i - x_j||.
-    distances = jnp.sqrt(jnp.sum(jnp.square(offsets), axis=-1, keepdims=True) + _DIST_EPS)
-    return jnp.concatenate((bond_features, offsets, distances), axis=-1) * pair_mask
-
-
 class _TransformerBlock(nn.Module):
     """Pair-biased multi-head self-attention block with adaptive noise conditioning."""
 
-    config: TransformerConfig
+    config: config_lib.TransformerConfig
 
     @override
     @jt.typed
@@ -132,7 +43,7 @@ class _TransformerBlock(nn.Module):
             act: Per-atom hidden activations.
             noise_cond: Per-molecule noise conditioning vector.
             pair_bias: Per-head pairwise attention logit bias.
-            atom_mask: Boolean mask indicating valid atoms.
+            atom_mask: Valid-atom mask.
 
         Returns:
             Updated per-atom activations with padded positions zeroed out.
@@ -184,7 +95,7 @@ class _TransformerBlock(nn.Module):
 class Denoiser(nn.Module):
     """Karras-preconditioned Transformer that predicts clean 3D molecular coordinates."""
 
-    config: DenoiserConfig = DEFAULT_DENOISER_CONFIG
+    config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG
 
     @override
     @jt.typed
@@ -279,3 +190,37 @@ class Denoiser(nn.Module):
             + factors.c_out[:, None, None] * raw_output
         )
         return geometry.zero_center_of_mass(denoised_positions, batch.atom_mask)
+
+
+@jt.typed
+def _fourier_noise_embedding(
+    sigma: jt.Float[jt.Array, " batch"],
+    *,
+    embedding_dim: int,
+    sigma_data: float,
+    config: config_lib.FourierNoiseConfig,
+) -> jt.Float[jt.Array, "batch {embedding_dim}"]:
+    """Embeds scaled log-noise levels using sinusoidal log-spaced frequencies."""
+    half_dim = embedding_dim // 2
+    c_noise = config.log_sigma_scale * jnp.log(sigma / sigma_data)
+    freq_exponents = jnp.linspace(0.0, 1.0, half_dim, dtype=jnp.float32)
+    frequencies = jnp.exp(-jnp.log(config.max_period) * freq_exponents)
+    # (batch, half_dim) outer product of c_noise (batch, 1) and frequencies (1, half_dim).
+    angles = c_noise[:, None] * frequencies[None, :]
+    return jnp.concatenate((jnp.sin(angles), jnp.cos(angles)), axis=-1)
+
+
+@jt.typed
+def _pairwise_geometry_features(
+    scaled_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
+    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+) -> jt.Float[jt.Array, "batch num_atoms num_atoms num_pair_features"]:
+    """Combines 2D bond features with 3D pairwise displacements and Euclidean distances."""
+    # (batch, num_atoms, num_atoms, 1) pairwise valid-atom mask.
+    pair_mask = (atom_mask[:, :, None] & atom_mask[:, None, :])[..., None]
+    # (batch, num_atoms, num_atoms, 3) pairwise displacement vectors x_i - x_j.
+    offsets = scaled_positions[:, :, None, :] - scaled_positions[:, None, :, :]
+    # (batch, num_atoms, num_atoms, 1) pairwise Euclidean distances ||x_i - x_j||.
+    distances = jnp.sqrt(jnp.sum(jnp.square(offsets), axis=-1, keepdims=True) + _DIST_EPS)
+    return jnp.concatenate((bond_features, offsets, distances), axis=-1) * pair_mask

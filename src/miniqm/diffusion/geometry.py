@@ -42,7 +42,7 @@ def zero_center_of_mass(
 
     Args:
         positions: Atomic coordinates.
-        atom_mask: Boolean mask of valid atoms.
+        atom_mask: Valid-atom mask.
 
     Returns:
         Centered coordinates with padded atoms set to zero.
@@ -62,7 +62,7 @@ def random_rotation(
     Args:
         key: PRNG key for sampling rotations.
         positions: Atomic coordinates.
-        atom_mask: Boolean mask of valid atoms.
+        atom_mask: Valid-atom mask.
 
     Returns:
         Rotated coordinates with padded atoms set to zero.
@@ -70,12 +70,12 @@ def random_rotation(
     *batch_shape, _, _ = positions.shape
     # (*batch, 2, 3) two random 3D vectors for Gram-Schmidt orthogonalization.
     basis = jax.random.normal(key, shape=(*batch_shape, 2, _SPATIAL_DIMS), dtype=positions.dtype)
-    first_vec = basis[..., 0, :]
-    second_vec = basis[..., 1, :]
+    first_basis = basis[..., 0, :]
+    second_basis = basis[..., 1, :]
 
-    axis_x = _normalize(first_vec)
-    projection = jnp.sum(second_vec * axis_x, axis=-1, keepdims=True)
-    axis_y = _normalize(second_vec - projection * axis_x)
+    axis_x = _normalize(first_basis)
+    projection = jnp.sum(second_basis * axis_x, axis=-1, keepdims=True)
+    axis_y = _normalize(second_basis - projection * axis_x)
     axis_z = jnp.cross(axis_x, axis_y)
     # (*batch, 3, 3) proper rotation matrix with orthonormal rows (axis_x, axis_y, axis_z).
     rotation = jnp.stack((axis_x, axis_y, axis_z), axis=-2)
@@ -100,13 +100,13 @@ def kabsch_align(
     """Rigidly aligns target coordinates onto reference coordinates over valid atoms.
 
     Restricts the alignment to proper rotations (det = +1) so chiral enantiomers
-    are not reflected onto each other. Applies stop_gradient to the optimal
-    rotation and centroids so gradients flow only through target coordinates.
+    are not reflected onto each other. Detaches the optimal rotation and centroids
+    from gradient computation so gradients flow only through target coordinates.
 
     Args:
         reference: Reference coordinates to align onto.
         target: Coordinates to be rotated and translated.
-        atom_mask: Boolean mask of valid atoms.
+        atom_mask: Valid-atom mask.
 
     Returns:
         Aligned target coordinates with padded atoms set to zero.
@@ -129,16 +129,16 @@ def kabsch_align(
         centered_ref,
         precision=jax.lax.Precision.HIGHEST,
     )
-    u_mat, _, vt_mat = jnp.linalg.svd(covariance, full_matrices=True)
+    left_singular, _, right_singular_t = jnp.linalg.svd(covariance, full_matrices=True)
 
-    # (*batch, 3, 1) row-wise sign flip [1, 1, sign(det(U @ V^T))] on V^T to enforce det(R) = +1.
-    det_sign = jnp.where(jnp.linalg.det(u_mat @ vt_mat) < 0.0, -1.0, 1.0)
+    det_sign = jnp.where(jnp.linalg.det(left_singular @ right_singular_t) < 0.0, -1.0, 1.0)
     ones = jnp.ones_like(det_sign)
+    # (*batch, 3, 1) row-wise sign flip [1, 1, sign(det(U @ V^T))] on V^T to enforce det(R) = +1.
     reflection_fix = jnp.stack((ones, ones, det_sign), axis=-1)[..., :, None]
     # (*batch, 3, 3) optimal proper rotation matrix R = U @ diag(1, 1, det_sign) @ V^T.
     rotation = jnp.matmul(
-        u_mat,
-        vt_mat * reflection_fix,
+        left_singular,
+        right_singular_t * reflection_fix,
         precision=jax.lax.Precision.HIGHEST,
     )
 

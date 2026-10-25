@@ -5,12 +5,12 @@ from miniqm import viz
 from miniqm.data import batch
 
 
-def test_format_xyz_block_and_trajectory_exclude_padded_atoms() -> None:
+def test_format_xyz_block_and_trajectory_exclude_padded_atoms():
     graph = batch.featurize_smiles("CO")
-    num_valid = graph.atom_features.shape[0]
-    padded_features = np.zeros((num_valid + 2, graph.atom_features.shape[1]), dtype=np.float32)
+    num_valid, num_atom_features = graph.atom_features.shape
+    padded_features = np.zeros((num_valid + 2, num_atom_features), dtype=np.float32)
     padded_features[:num_valid] = graph.atom_features
-    atom_mask = np.array([True] * num_valid + [False, False], dtype=np.bool_)
+    atom_mask = np.array((*(True,) * num_valid, False, False), dtype=np.bool_)
     positions = np.arange((num_valid + 2) * 3, dtype=np.float32).reshape(num_valid + 2, 3)
 
     symbols = viz.atom_symbols_from_features(padded_features, atom_mask)
@@ -25,27 +25,32 @@ def test_format_xyz_block_and_trajectory_exclude_padded_atoms() -> None:
     assert len(lines) == num_valid + 2
 
     trajectory = np.stack((positions, positions + 1.0), axis=0)
-    xyz_traj = viz.format_xyz_trajectory(trajectory, padded_features, atom_mask)
-    assert xyz_traj.count("frame ") == 2
+    xyz_trajectory = viz.format_xyz_trajectory(trajectory, padded_features, atom_mask)
+    assert xyz_trajectory.count("frame ") == 2
 
 
-def test_py3dmol_viewers_construct_without_error() -> None:
+def test_py3dmol_viewers_construct_without_error():
     graph = batch.featurize_smiles("C")
-    num_atoms = graph.atom_features.shape[0]
+    num_atoms, _ = graph.atom_features.shape
     atom_mask = np.ones((num_atoms,), dtype=np.bool_)
     positions = np.zeros((num_atoms, 3), dtype=np.float32)
     trajectory = np.zeros((4, num_atoms, 3), dtype=np.float32)
 
-    mol_view = viz.show_molecule(positions, graph.atom_features, atom_mask)
-    overlay_view = viz.show_overlay(positions, positions + 0.1, graph.atom_features, atom_mask)
-    traj_view = viz.show_trajectory(trajectory, graph.atom_features, atom_mask)
+    molecule_view = viz.show_molecule(positions, graph.atom_features, atom_mask)
+    overlay_view = viz.show_overlay(
+        reference_positions=positions,
+        candidate_positions=positions + 0.1,
+        atom_features=graph.atom_features,
+        atom_mask=atom_mask,
+    )
+    trajectory_view = viz.show_trajectory(trajectory, graph.atom_features, atom_mask)
 
-    assert isinstance(mol_view, py3Dmol.view)
+    assert isinstance(molecule_view, py3Dmol.view)
     assert isinstance(overlay_view, py3Dmol.view)
-    assert isinstance(traj_view, py3Dmol.view)
+    assert isinstance(trajectory_view, py3Dmol.view)
 
 
-def test_normalize_trajectory_frames_rescales_high_variance_frames() -> None:
+def test_normalize_trajectory_frames_rescales_high_variance_frames():
     atom_mask = np.array([True, True, False], dtype=np.bool_)
     final_frame = np.array([[2.0, 0.0, 0.0], [-2.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
     noisy_frame = final_frame * 50.0

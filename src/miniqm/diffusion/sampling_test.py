@@ -5,22 +5,20 @@ from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
+from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.diffusion import geometry, model, noise, sampling
 
-_TEST_DENOISER_CONFIG: Final = model.DenoiserConfig(
-    transformer=model.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
+_TEST_DENOISER_CONFIG: Final = config_lib.DenoiserConfig(
+    transformer=config_lib.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
 )
 
 
 @jt.typed
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _SamplerTestSetup:
-    """Synthetic 2-molecule graph batch and initialized denoiser for sampler tests."""
-
     denoiser: model.Denoiser
     params: flax_typing.VariableDict
     batch: batch_lib.JaxBatch
@@ -28,7 +26,6 @@ class _SamplerTestSetup:
 
 @jt.typed
 def _make_test_setup() -> _SamplerTestSetup:
-    """Creates a 2-molecule synthetic graph batch and initialized denoiser parameters."""
     atom_key, bond_key, init_key = jax.random.split(jax.random.key(0), 3)
     graph_batch = batch_lib.JaxBatch(
         atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
@@ -40,6 +37,7 @@ def _make_test_setup() -> _SamplerTestSetup:
             ],
             dtype=jnp.bool_,
         ),
+        positions=jnp.zeros((2, 5, 3), dtype=jnp.float32),
     )
     denoiser = model.Denoiser(config=_TEST_DENOISER_CONFIG)
     dummy_positions = jnp.zeros((2, 5, 3), dtype=jnp.float32)
@@ -57,9 +55,9 @@ def _make_test_setup() -> _SamplerTestSetup:
     )
 
 
-def test_sample_coordinates_returns_zero_centered_masked_positions() -> None:
+def test_sample_coordinates_returns_zero_centered_masked_positions():
     setup = _make_test_setup()
-    sampling_config = sampling.SamplingConfig(num_steps=5)
+    sampling_config = config_lib.SamplingConfig(num_steps=5)
 
     sampled_positions = sampling.sample_coordinates(
         jax.random.key(2),
@@ -88,10 +86,10 @@ def test_sample_coordinates_returns_zero_centered_masked_positions() -> None:
     )
 
 
-def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network() -> None:
+def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network():
     setup = _make_test_setup()
     zero_params = jax.tree.map(jnp.zeros_like, setup.params)
-    ode_config = sampling.SamplingConfig(num_steps=8, gamma_0=0.0, step_scale=1.0)
+    ode_config = config_lib.SamplingConfig(num_steps=8, gamma_0=0.0, step_scale=1.0)
     sample_key = jax.random.key(4)
 
     sampled_positions = sampling.sample_coordinates(
@@ -102,8 +100,9 @@ def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network(
         config=ode_config,
     )
 
-    schedule = noise.rollout_schedule(ode_config.num_steps, config=ode_config.noise)
-    factors = noise.preconditioning_factors(schedule[:-1], config=ode_config.noise)
+    noise_config = setup.denoiser.config.noise
+    schedule = noise.rollout_schedule(ode_config.num_steps, config=noise_config)
+    factors = noise.preconditioning_factors(schedule[:-1], config=noise_config)
     step_multipliers = 1.0 + ((schedule[1:] - schedule[:-1]) / schedule[:-1]) * (
         1.0 - factors.c_skip
     )
@@ -119,27 +118,36 @@ def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network(
     np.testing.assert_allclose(sampled_positions, expected_positions, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize(
-    ("num_steps", "gamma_0", "noise_scale", "step_scale", "expected_message"),
-    (
-        (0, 0.8, 1.003, 1.5, "Expected positive num_steps"),
-        (10, -0.1, 1.003, 1.5, "Expected non-negative gamma_0"),
-        (10, 0.8, -1.0, 1.5, "Expected non-negative noise_scale"),
-        (10, 0.8, 1.003, 0.0, "Expected positive step_scale"),
-    ),
-    ids=("zero_steps", "negative_gamma", "negative_noise_scale", "zero_step_scale"),
-)
-def test_sampling_config_rejects_invalid_parameters(
-    num_steps: int,
-    gamma_0: float,
-    noise_scale: float,
-    step_scale: float,
-    expected_message: str,
-) -> None:
-    with pytest.raises(ValueError, match=expected_message):
-        sampling.SamplingConfig(
-            num_steps=num_steps,
-            gamma_0=gamma_0,
-            noise_scale=noise_scale,
-            step_scale=step_scale,
-        )
+def test_euler_step_uses_unit_step_scale_below_gamma_min():
+    setup = _make_test_setup()
+    zero_params = jax.tree.map(jnp.zeros_like, setup.params)
+    initial_positions = geometry.zero_center_of_mass(
+        jnp.ones((2, 5, 3), dtype=jnp.float32),
+        setup.batch.atom_mask,
+    )
+    sigma_current = jnp.array(0.05, dtype=jnp.float32)
+    sigma_next = jnp.array(0.0, dtype=jnp.float32)
+
+    # Below gamma_min=0.1, step_scale=1.5 is inactive so the step matches step_scale=1.0.
+    step_with_boost = sampling._euler_step(
+        jax.random.key(0),
+        initial_positions,
+        denoiser=setup.denoiser,
+        params=zero_params,
+        sigma_current=sigma_current,
+        sigma_next=sigma_next,
+        batch=setup.batch,
+        config=config_lib.SamplingConfig(gamma_min=0.1, step_scale=1.5),
+    )
+    step_unit = sampling._euler_step(
+        jax.random.key(0),
+        initial_positions,
+        denoiser=setup.denoiser,
+        params=zero_params,
+        sigma_current=sigma_current,
+        sigma_next=sigma_next,
+        batch=setup.batch,
+        config=config_lib.SamplingConfig(gamma_min=0.1, step_scale=1.0),
+    )
+
+    np.testing.assert_allclose(step_with_boost, step_unit, rtol=1e-6, atol=1e-6)

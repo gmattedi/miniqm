@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import json
 import pathlib
 from typing import Final
@@ -9,21 +10,20 @@ import pyarrow.parquet as pq
 import pytest
 from rdkit import Chem
 
+from miniqm import config as config_lib
+from miniqm.data import batch as batch_lib
 from miniqm.data import data_source, schema
-from miniqm.diffusion import losses, model, sampling
 from miniqm.training import checkpoint, train
 from miniqm.training import eval as eval_lib
 
-_TINY_MODEL_CONFIG: Final = model.DenoiserConfig(
-    transformer=model.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
+_TINY_MODEL_CONFIG: Final = config_lib.DenoiserConfig(
+    transformer=config_lib.TransformerConfig(hidden_dim=16, num_layers=1, num_heads=2),
 )
 
 
 def _write_sample_parquet(path: pathlib.Path, num_rows: int = 3) -> pathlib.Path:
-    """Writes a synthetic 2-atom HF QM9 Parquet split."""
     charges = (9, 1, *(0,) * 27)
     positions = ((0.0, 0.0, 0.0), (0.92, 0.0, 0.0), *((0.0, 0.0, 0.0),) * 27)
-    mulliken = (-0.4, 0.4, *(0.0,) * 27)
     rows = tuple(
         {
             schema.Column.INDEX: row_idx + 1,
@@ -33,26 +33,6 @@ def _write_sample_parquet(path: pathlib.Path, num_rows: int = 3) -> pathlib.Path
             schema.Column.SMILES_RELAXED: "F",
             schema.Column.CHARGES: charges,
             schema.Column.POSITIONS: positions,
-            schema.Column.MULLIKEN_CHARGES: mulliken,
-            schema.Column.A: 157.7,
-            schema.Column.B: 157.7,
-            schema.Column.C: 157.7,
-            schema.Column.MU: 1.8,
-            schema.Column.ALPHA: 13.2,
-            schema.Column.HOMO: -0.38,
-            schema.Column.LUMO: 0.11,
-            schema.Column.GAP: 0.50,
-            schema.Column.R2: 35.3,
-            schema.Column.ZPVE: 0.044,
-            schema.Column.U0: -40.47,
-            schema.Column.U: -40.47,
-            schema.Column.H: -40.47,
-            schema.Column.G: -40.49,
-            schema.Column.CV: 6.46,
-            schema.Column.U0_ATOMIZATION: -0.62,
-            schema.Column.U_ATOMIZATION: -0.62,
-            schema.Column.H_ATOMIZATION: -0.63,
-            schema.Column.G_ATOMIZATION: -0.59,
         }
         for row_idx in range(num_rows)
     )
@@ -60,14 +40,14 @@ def _write_sample_parquet(path: pathlib.Path, num_rows: int = 3) -> pathlib.Path
     return path
 
 
-def test_evaluate_loss_and_sampling_rmsd_return_finite_metrics(tmp_path: pathlib.Path) -> None:
+def test_evaluate_loss_and_sampling_rmsd_return_finite_metrics(tmp_path: pathlib.Path):
     parquet_path = _write_sample_parquet(tmp_path / "val.parquet", num_rows=3)
     val_source = data_source.DataSource(parquet_path, max_atoms=4)
     val_batch = next(val_source.iter_batches(batch_size=3, drop_last=False)).to_jax()
     state = train.init_train_state(
         jax.random.key(0),
         val_batch,
-        config=train.TrainConfig(model=_TINY_MODEL_CONFIG),
+        config=config_lib.TrainConfig(model=_TINY_MODEL_CONFIG),
     )
 
     val_metrics = eval_lib.evaluate_loss(
@@ -76,14 +56,14 @@ def test_evaluate_loss_and_sampling_rmsd_return_finite_metrics(tmp_path: pathlib
         val_source,
         batch_size=2,
         model_config=_TINY_MODEL_CONFIG,
-        loss_config=losses.DEFAULT_LOSS_CONFIG,
+        loss_config=config_lib.DEFAULT_LOSS_CONFIG,
     )
     sampling_metrics = eval_lib.evaluate_sampling_rmsd(
         state.ema_params,
         jax.random.key(2),
         val_batch,
         model_config=_TINY_MODEL_CONFIG,
-        sampling_config=sampling.SamplingConfig(num_steps=3),
+        sampling_config=config_lib.SamplingConfig(num_steps=3),
     )
 
     assert np.isfinite(val_metrics.total_loss)
@@ -97,28 +77,28 @@ def test_evaluate_loss_and_sampling_rmsd_return_finite_metrics(tmp_path: pathlib
     assert 0.0 <= sampling_metrics.sampled_lddt_median <= 1.0
 
 
-def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path) -> None:
+def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path):
     parquet_path = _write_sample_parquet(tmp_path / "test.parquet", num_rows=3)
     test_source = data_source.DataSource(parquet_path)
     first_batch = next(test_source.iter_batches(batch_size=3, drop_last=False)).to_jax()
-    train_config = train.TrainConfig(model=_TINY_MODEL_CONFIG)
+    train_config = config_lib.TrainConfig(model=_TINY_MODEL_CONFIG)
     state = train.init_train_state(jax.random.key(0), first_batch, config=train_config)
 
     run_dir = tmp_path / "run"
     train.write_run_config(
-        train.RunConfig(
+        config_lib.RunConfig(
             run_dir=run_dir,
             train=train_config,
-            sampling=sampling.SamplingConfig(num_steps=3),
+            sampling=config_lib.SamplingConfig(num_steps=3),
         )
     )
     checkpoint.save_checkpoint(
-        run_dir / "checkpoints" / "best.msgpack",
+        run_dir / "checkpoints" / config_lib.CheckpointName.BEST,
         checkpoint.Checkpoint(step=5, params=state.params, ema_params=state.ema_params),
     )
 
     report = eval_lib.run_evaluation(
-        eval_lib.EvalConfig(
+        config_lib.EvalConfig(
             run_dir=run_dir,
             test_path=parquet_path,
             batch_size=2,
@@ -132,14 +112,16 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     assert 0.0 <= report.sampling_metrics.sampled_lddt_mean <= 1.0
     assert 0.0 <= report.sampling_metrics.fraction_below_0_5a <= 1.0
     assert 0.0 <= report.sampling_metrics.fraction_below_1_0a <= 1.0
-    saved_report = json.loads((run_dir / "test_metrics.json").read_text(encoding="utf-8"))
+    saved_report = json.loads(
+        (run_dir / config_lib.ArtifactName.TEST_METRICS).read_text(encoding="utf-8")
+    )
     assert saved_report["step"] == 5
 
     smiles_file = tmp_path / "molecules.smi"
     smiles_file.write_text("F\nO\n", encoding="utf-8")
     output_sdf = tmp_path / "out.sdf"
     mols = eval_lib.run_smiles_sampling(
-        eval_lib.SampleSmilesConfig(
+        config_lib.SampleSmilesConfig(
             run_dir=run_dir,
             smiles_file=smiles_file,
             num_conformers=2,
@@ -154,23 +136,46 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     loaded_mols = tuple(supplier)
     assert len(loaded_mols) == 4
     assert loaded_mols[0].GetNumAtoms() == 2
-    assert loaded_mols[0].GetProp("CONFORMER_ID") == "0"
-    assert loaded_mols[0].GetProp("SEED") == "10"
+    assert loaded_mols[0].GetProp(batch_lib.SdfProperty.CONFORMER_ID) == "0"
+    assert loaded_mols[0].GetProp(batch_lib.SdfProperty.SEED) == "10"
     assert loaded_mols[1].GetNumAtoms() == 2
-    assert loaded_mols[1].GetProp("CONFORMER_ID") == "1"
-    assert loaded_mols[1].GetProp("SEED") == "11"
+    assert loaded_mols[1].GetProp(batch_lib.SdfProperty.CONFORMER_ID) == "1"
+    assert loaded_mols[1].GetProp(batch_lib.SdfProperty.SEED) == "11"
     assert loaded_mols[2].GetNumAtoms() == 3
 
 
-def test_eval_and_sample_configs_reject_invalid_values() -> None:
-    with pytest.raises(ValueError, match="positive batch_size"):
-        eval_lib.EvalConfig(batch_size=0)
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: config_lib.EvalConfig(batch_size=0),
+        lambda: config_lib.EvalConfig(num_sampling_steps=0),
+        lambda: config_lib.SampleSmilesConfig(num_conformers=0),
+        lambda: config_lib.SampleSmilesConfig(num_sampling_steps=0),
+    ),
+    ids=(
+        "eval_batch_size",
+        "eval_num_sampling_steps",
+        "sample_num_conformers",
+        "sample_num_sampling_steps",
+    ),
+)
+def test_eval_and_sample_configs_reject_invalid_values(
+    factory: Callable[[], object],
+):
+    with pytest.raises(ValueError, match="greater than 0"):
+        factory()
 
-    with pytest.raises(ValueError, match="positive num_sampling_steps"):
-        eval_lib.EvalConfig(num_sampling_steps=0)
 
-    with pytest.raises(ValueError, match="positive num_conformers"):
-        eval_lib.SampleSmilesConfig(num_conformers=0)
+def test_resolve_smiles_inputs_validates_sources(tmp_path: pathlib.Path):
+    with pytest.raises(ValueError, match="Expected non-empty smiles"):
+        eval_lib._resolve_smiles_inputs(config_lib.SampleSmilesConfig(smiles=()))
 
-    with pytest.raises(ValueError, match="positive num_sampling_steps"):
-        eval_lib.SampleSmilesConfig(num_sampling_steps=0)
+    with pytest.raises(FileNotFoundError):
+        eval_lib._resolve_smiles_inputs(
+            config_lib.SampleSmilesConfig(smiles_file=tmp_path / "missing.smi")
+        )
+
+    empty_file = tmp_path / "empty.smi"
+    empty_file.write_text("\n   \n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Expected at least one SMILES"):
+        eval_lib._resolve_smiles_inputs(config_lib.SampleSmilesConfig(smiles_file=empty_file))

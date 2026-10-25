@@ -1,9 +1,10 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the checkpointing, evaluation, and training loop logic in this directory whenever code changes. -->
+<!-- AGENT NOTICE: Keep this README synchronized with the training, evaluation, and checkpointing implementations in this directory whenever code changes. -->
 
 # Training, Evaluation & Checkpointing
 
-Manages optimization state, validation metrics, and checkpoint persistence for the coordinate denoiser:
+`miniqm.training` manages optimization state, multi-device CPU batch sharding, periodic validation, conformer sampling benchmarks, and MessagePack checkpointing:
 
-* Builds a global-norm-clipped AdamW optimizer with linear warmup and cosine learning-rate decay, sharding training batches across logical XLA devices while maintaining an exponential moving average (EMA) of model parameters across steps.
-* Evaluates single-step teacher-forced diffusion loss, full reverse-diffusion conformer generation RMSD, local lDDT, and threshold coverage across evaluation splits, and standalone 3D conformer generation from SMILES strings to SDF files.
-* Serializes and restores step count, active parameters, EMA parameters, and run configurations from MessagePack checkpoints, tracking both the latest checkpoint and the best validation EMA checkpoint (by sampled conformer lDDT) while logging architecture/parameter summaries, a live progress bar, TensorBoard event files, and JSONL scalars.
+* `train.py` defines `TrainConfig`, `RunConfig`, and `TrainState`. It runs the compiled training step (`train_step`) with global-norm-clipped AdamW (`warmup_cosine_decay_schedule`), shards training batches across logical XLA CPU devices via `NamedSharding`, and updates exponential moving average (`ema_params`) weights at every step.
+* `train.py` writes each training run into a timestamped subdirectory (`<run_dir>/<YYYYMMDD_HHMMSS>/`), logs submodule parameter counts and a Flax `tabulate` summary table, displays a live Rich progress bar, logs scalar metrics to TensorBoard and `metrics.jsonl`, and saves `best.msgpack` when validation `sampled_lddt_mean` improves.
+* `eval.py` implements molecule-weighted validation loss evaluation (`evaluate_loss`), validation conformer sampling (`evaluate_sampling_rmsd`), full-split test evaluation (`run_evaluation`), and multi-conformer SMILES-to-3D SDF generation (`run_smiles_sampling`).
+* `checkpoint.py` resolves direct or timestamped parent run directories (`resolve_run_dir`), serializes and restores `Checkpoint` states (`step`, `params`, `ema_params`) via `flax.serialization` with atomic file replacement, and reconstructs full `LoadedRun` bundles from `config.json`.

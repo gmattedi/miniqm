@@ -4,12 +4,12 @@
 
 `miniqm` is a 3D molecular coordinate diffusion model trained on the QM9 dataset in JAX, Flax, and Optax.
 
-It predicts equilibrium 3D atomic coordinates directly in Cartesian $\mathbb{R}^3$ from a 2D molecular graph (atoms, bonds, ring membership, and formal stereochemistry) without $\mathrm{SO}(3)$-equivariant layers:
+It predicts equilibrium 3D atomic coordinates directly in Cartesian $\mathbb{R}^3$ from a 2D molecular graph (atoms, bonds, ring membership, and 3D-perceived stereochemistry) without $\mathrm{SO}(3)$-equivariant layers:
 
 * Ground-truth conformers are centered at the origin and augmented with uniform random 3D rotations at every training step.
 * A pair-biased Transformer denoiser with Karras EDM preconditioning predicts clean coordinates from Gaussian-corrupted inputs.
-* Training minimizes a Kabsch-aligned coordinate MSE combined with a local pairwise interatomic distance loss.
-* Conformer generation integrates the reverse probability flow ODE with stochastic churn from Gaussian noise down to $\sigma_{\min}$.
+* Training minimizes a Kabsch-aligned coordinate MSE combined with a per-molecule local pairwise interatomic distance loss.
+* Conformer generation integrates the reverse probability flow ODE with stochastic noise injection from Gaussian noise down to $\sigma_{\min}$.
 
 ## Quickstart
 
