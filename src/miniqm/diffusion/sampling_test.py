@@ -27,28 +27,40 @@ class _SamplerTestSetup:
 @jt.typed
 def _make_test_setup() -> _SamplerTestSetup:
     atom_key, bond_key, init_key = jax.random.split(jax.random.key(0), 3)
+    atom_mask = jnp.array(
+        [
+            [True, True, True, True, False],
+            [True, True, True, False, False],
+        ],
+        dtype=jnp.bool_,
+    )
+    atom_features = jax.random.normal(
+        atom_key,
+        (2, 5, batch_lib.NUM_ATOM_FEATURES),
+    )
+    bond_features = jax.random.normal(
+        bond_key,
+        (2, 5, 5, batch_lib.NUM_BOND_FEATURES),
+    )
+    pair_mask = noise.off_diagonal_pair_mask(atom_mask)
     graph_batch = batch_lib.JaxBatch(
-        atom_features=jax.random.normal(
-            atom_key, (2, 5, batch_lib.NUM_ATOM_FEATURES), dtype=jnp.float32
-        ),
-        bond_features=jax.random.normal(
-            bond_key, (2, 5, 5, batch_lib.NUM_BOND_FEATURES), dtype=jnp.float32
-        ),
-        atom_mask=jnp.array(
-            [
-                [True, True, True, True, False],
-                [True, True, True, False, False],
-            ],
-            dtype=jnp.bool_,
-        ),
-        positions=jnp.zeros((2, 5, 3), dtype=jnp.float32),
+        atom_features=atom_features,
+        bond_features=bond_features,
+        atom_mask=atom_mask,
+        positions=jnp.zeros((2, 5, 3)),
+        atom_cond_mask=jnp.broadcast_to(atom_mask[..., None], atom_features.shape),
+        bond_cond_mask=jnp.broadcast_to(pair_mask, bond_features.shape),
     )
     denoiser = model.Denoiser(config=_TEST_DENOISER_CONFIG)
-    dummy_positions = jnp.zeros((2, 5, 3), dtype=jnp.float32)
-    dummy_sigma = jnp.ones((2,), dtype=jnp.float32)
+    dummy_positions = jnp.zeros((2, 5, 3))
+    dummy_atoms = jnp.zeros_like(atom_features)
+    dummy_bonds = jnp.zeros_like(bond_features)
+    dummy_sigma = jnp.ones((2,))
     params = denoiser.init(
         init_key,
         dummy_positions,
+        dummy_atoms,
+        dummy_bonds,
         dummy_sigma,
         batch=graph_batch,
     )
@@ -59,11 +71,18 @@ def _make_test_setup() -> _SamplerTestSetup:
     )
 
 
-def test_sample_coordinates_returns_zero_centered_masked_positions():
+def test_sample_coordinates_and_molecules_return_zero_centered_masked_outputs():
     setup = _make_test_setup()
     sampling_config = config_lib.SamplingConfig(num_steps=5)
 
     sampled_positions = sampling.sample_coordinates(
+        jax.random.key(2),
+        setup.denoiser,
+        setup.params,
+        batch=setup.batch,
+        config=sampling_config,
+    )
+    sampled_molecules = sampling.sample_molecules(
         jax.random.key(2),
         setup.denoiser,
         setup.params,
@@ -77,9 +96,24 @@ def test_sample_coordinates_returns_zero_centered_masked_positions():
         batch=setup.batch,
         config=sampling_config,
     )
+    mol_trajectory = sampling.sample_molecule_trajectory(
+        jax.random.key(2),
+        setup.denoiser,
+        setup.params,
+        batch=setup.batch,
+        config=sampling_config,
+    )
 
     assert trajectory.shape == (6, 2, 5, 3)
+    assert mol_trajectory.atom_features.shape == (6, 2, 5, batch_lib.NUM_ATOM_FEATURES)
+    assert mol_trajectory.bond_features.shape == (6, 2, 5, 5, batch_lib.NUM_BOND_FEATURES)
     np.testing.assert_allclose(trajectory[-1], sampled_positions, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        sampled_molecules.positions,
+        sampled_positions,
+        rtol=1e-6,
+        atol=1e-6,
+    )
     assert sampled_positions.shape == (2, 5, 3)
     assert bool(jnp.all(jnp.isfinite(sampled_positions)))
     np.testing.assert_allclose(jnp.sum(sampled_positions, axis=1), 0.0, atol=1e-5)
@@ -87,6 +121,12 @@ def test_sample_coordinates_returns_zero_centered_masked_positions():
         sampled_positions * (~setup.batch.atom_mask)[..., None],
         0.0,
         atol=1e-7,
+    )
+    np.testing.assert_allclose(
+        sampled_molecules.bond_features,
+        jnp.swapaxes(sampled_molecules.bond_features, 1, 2),
+        rtol=1e-5,
+        atol=1e-5,
     )
 
 
@@ -112,9 +152,9 @@ def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network(
     )
     total_contraction = jnp.prod(step_multipliers)
 
-    initial_key, _ = jax.random.split(sample_key)
+    pos_init_key, _, _, _ = jax.random.split(sample_key, 4)
     initial_positions = geometry.zero_center_of_mass(
-        schedule[0] * jax.random.normal(initial_key, (2, 5, 3), dtype=jnp.float32),
+        schedule[0] * jax.random.normal(pos_init_key, (2, 5, 3)),
         setup.batch.atom_mask,
     )
     expected_positions = initial_positions * total_contraction
@@ -125,17 +165,21 @@ def test_sample_coordinates_matches_analytical_ode_contraction_for_zero_network(
 def test_euler_step_uses_unit_step_scale_below_gamma_min():
     setup = _make_test_setup()
     zero_params = jax.tree.map(jnp.zeros_like, setup.params)
-    initial_positions = geometry.zero_center_of_mass(
-        jnp.ones((2, 5, 3), dtype=jnp.float32),
-        setup.batch.atom_mask,
+    initial_state = sampling.SampledMolecules(
+        positions=geometry.zero_center_of_mass(
+            jnp.ones((2, 5, 3)),
+            setup.batch.atom_mask,
+        ),
+        atom_features=jnp.ones_like(setup.batch.atom_features),
+        bond_features=jnp.ones_like(setup.batch.bond_features),
     )
-    sigma_current = jnp.array(0.05, dtype=jnp.float32)
-    sigma_next = jnp.array(0.0, dtype=jnp.float32)
+    sigma_current = jnp.array(0.05)
+    sigma_next = jnp.array(0.0)
 
     # Below gamma_min=0.1, step_scale=1.5 is inactive so the step matches step_scale=1.0.
     step_with_boost = sampling._euler_step(
         jax.random.key(0),
-        initial_positions,
+        initial_state,
         denoiser=setup.denoiser,
         params=zero_params,
         sigma_current=sigma_current,
@@ -145,7 +189,7 @@ def test_euler_step_uses_unit_step_scale_below_gamma_min():
     )
     step_unit = sampling._euler_step(
         jax.random.key(0),
-        initial_positions,
+        initial_state,
         denoiser=setup.denoiser,
         params=zero_params,
         sigma_current=sigma_current,
@@ -154,4 +198,9 @@ def test_euler_step_uses_unit_step_scale_below_gamma_min():
         config=config_lib.SamplingConfig(gamma_min=0.1, step_scale=1.0),
     )
 
-    np.testing.assert_allclose(step_with_boost, step_unit, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        step_with_boost.positions,
+        step_unit.positions,
+        rtol=1e-6,
+        atol=1e-6,
+    )

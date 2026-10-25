@@ -98,6 +98,8 @@ def _make_expected_cf_features() -> batch.GraphFeatures:
     return batch.GraphFeatures(
         atom_features=atom_features,
         bond_features=bond_features,
+        atom_cond_mask=np.ones_like(atom_features, dtype=np.bool_),
+        bond_cond_mask=np.ones_like(bond_features, dtype=np.bool_),
     )
 
 
@@ -239,6 +241,31 @@ def test_featurize_molecule_aligns_reordered_smiles_branches_via_substructure():
     assert features.bond_features[1, 2, 2] == 1.0
 
 
+def test_featurize_molecule_strips_stereogenic_imine_hydrogens():
+    methanimine = schema.Molecule(
+        index=11,
+        tag="gdb",
+        smiles="C=N",
+        smiles_relaxed="C=N",
+        atomic_numbers=np.array([6, 7, 1, 1, 1], dtype=np.int64),
+        positions=np.array(
+            [
+                [0.0, 0.0, 0.0],  # C0
+                [1.27, 0.0, 0.0],  # N1
+                [-0.55, 0.94, 0.0],  # H2 on C0
+                [-0.55, -0.94, 0.0],  # H3 on C0
+                [1.82, 0.85, 0.0],  # H4 on N1 (defines C=N stereo in 3D)
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+    features = batch.featurize_molecule(methanimine)
+
+    assert features.atom_features.shape == (2, batch.NUM_ATOM_FEATURES)
+    assert features.bond_features[0, 1, 2] == 1.0
+
+
 def test_collate_batch_pads_and_centers_positions():
     mol = _make_cf_molecule(offset=2.0)
     expected_cf = _make_expected_cf_features()
@@ -254,15 +281,21 @@ def test_collate_batch_pads_and_centers_positions():
         [[[-0.7, 0.0, 0.0], [0.7, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
         dtype=np.float32,
     )
+    expected_atom_cond_mask = np.zeros((1, 4, batch.NUM_ATOM_FEATURES), dtype=np.bool_)
+    expected_atom_cond_mask[0, :2] = True
+    expected_bond_cond_mask = np.zeros((1, 4, 4, batch.NUM_BOND_FEATURES), dtype=np.bool_)
+    expected_bond_cond_mask[0, :2, :2] = True
 
     expected_batch = batch.Batch(
         atom_features=expected_atom_features,
         bond_features=expected_bond_features,
         atom_mask=expected_mask,
         positions=expected_positions,
+        atom_cond_mask=expected_atom_cond_mask,
+        bond_cond_mask=expected_bond_cond_mask,
     )
     assert collated_batch == expected_batch
-    assert len(jax.tree.leaves(collated_batch.to_jax())) == 4
+    assert len(jax.tree.leaves(collated_batch.to_jax())) == 6
 
 
 def test_featurize_smiles_rejects_invalid_smiles():
@@ -297,6 +330,83 @@ def test_collate_smiles_pads_graph_features():
     assert conformer_mol.GetProp(batch.SdfProperty.SMILES) == "CF"
     np.testing.assert_allclose(
         conformer_mol.GetConformer().GetPositions(),
+        np.array([[0.0, 0.0, 0.0], [1.38, 0.0, 0.0]], dtype=np.float64),
+    )
+
+
+def test_featurize_smiles_supports_uranium_dummy_atoms_and_unspecified_bonds():
+    features = batch.featurize_smiles("c1ccccc1~U~U(=U)")
+
+    assert features.atom_features.shape == (9, batch.NUM_ATOM_FEATURES)
+    assert features.bond_features.shape == (9, 9, batch.NUM_BOND_FEATURES)
+
+    # Phenyl carbons 0..4 do not touch U or ~, so all 26 channels are conditioned.
+    assert np.all(features.atom_cond_mask[:5])
+
+    # Phenyl carbon 5 is connected via ~ to U6: element (0:4), charge (14:17), and phenyl
+    # aromaticity/ring membership (21:23) are known, while degree/H-count/hybridization/chirality
+    # are left unconditioned.
+    assert np.all(features.atom_cond_mask[5, 0:4])
+    assert not np.any(features.atom_cond_mask[5, 4:14])
+    assert np.all(features.atom_cond_mask[5, 14:17])
+    assert not np.any(features.atom_cond_mask[5, 17:21])
+    assert np.all(features.atom_cond_mask[5, 21:23])
+    assert not np.any(features.atom_cond_mask[5, 23:26])
+
+    # Dummy uranium atoms 6, 7, 8 have all atom channels unconditioned and zeroed.
+    assert not np.any(features.atom_cond_mask[6:])
+    assert np.all(features.atom_features[6:] == 0.0)
+
+    # Unspecified ~ bonds (5, 6) and (6, 7) condition channel 0 (NONE = 0.0, i.e. bonded)
+    # while leaving bond-order channels 1..5 unconditioned.
+    for u_idx, v_idx in ((5, 6), (6, 7)):
+        assert features.bond_cond_mask[u_idx, v_idx, 0]
+        assert features.bond_features[u_idx, v_idx, 0] == 0.0
+        assert not np.any(features.bond_cond_mask[u_idx, v_idx, 1:])
+        assert np.all(features.bond_features[u_idx, v_idx, 1:] == 0.0)
+
+    # Explicit = bond (7, 8) between two dummy atoms conditions bond order (0:5) as DOUBLE
+    # (channel 2), while leaving ring membership (channel 5) unconditioned.
+    assert np.all(features.bond_cond_mask[7, 8, :5])
+    assert not features.bond_cond_mask[7, 8, 5]
+    assert features.bond_features[7, 8, 2] == 1.0
+
+    # Unconnected pairs involving dummy U (e.g. 0 and 6) are unconditioned so the model
+    # can freely form or omit bonds to dummy atoms, while known phenyl pairs (0, 3) are fixed.
+    assert not np.any(features.bond_cond_mask[0, 6])
+    assert np.all(features.bond_cond_mask[0, 3])
+    assert features.bond_features[0, 3, 0] == 1.0
+
+    aromatic_tilde = batch.featurize_smiles("c1cc~ccc1")
+    assert aromatic_tilde.atom_features.shape == (6, batch.NUM_ATOM_FEATURES)
+    assert aromatic_tilde.bond_cond_mask[2, 3, 0]
+    assert aromatic_tilde.bond_features[2, 3, 0] == 0.0
+    assert not np.any(aromatic_tilde.bond_cond_mask[2, 3, 1:])
+
+
+def test_build_generated_mol_reconstructs_rdkit_conformer():
+    expected_cf = _make_expected_cf_features()
+    positions = np.array([[0.0, 0.0, 0.0], [1.38, 0.0, 0.0], [9.0, 9.0, 9.0]], dtype=np.float32)
+    atom_features = np.zeros((3, batch.NUM_ATOM_FEATURES), dtype=np.float32)
+    atom_features[:2] = expected_cf.atom_features
+    bond_features = np.zeros((3, 3, batch.NUM_BOND_FEATURES), dtype=np.float32)
+    bond_features[:2, :2] = expected_cf.bond_features
+    atom_mask = np.array([True, True, False], dtype=np.bool_)
+
+    mol = batch.build_generated_mol(
+        positions,
+        atom_features,
+        bond_features,
+        atom_mask,
+        prompt_smiles="U~U",
+    )
+
+    assert mol.GetNumAtoms() == 2
+    assert tuple(atom.GetSymbol() for atom in mol.GetAtoms()) == ("C", "F")
+    assert mol.GetBondBetweenAtoms(0, 1) is not None
+    assert mol.GetProp(batch.SdfProperty.SMILES) == "CF"
+    np.testing.assert_allclose(
+        mol.GetConformer().GetPositions(),
         np.array([[0.0, 0.0, 0.0], [1.38, 0.0, 0.0]], dtype=np.float64),
     )
 

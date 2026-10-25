@@ -1,5 +1,6 @@
-"""Karras EDM 3D molecular coordinate Transformer denoiser."""
+"""Karras EDM joint 2D+3D molecular Transformer denoiser."""
 
+import dataclasses
 import logging
 from typing import Final, override
 
@@ -19,6 +20,18 @@ _SPATIAL_DIMS: Final = 3
 _MASK_FILL_VALUE: Final = -1e9
 # Prevents infinite gradient of sqrt(r^2) at zero interatomic distance.
 _DIST_EPS: Final = 1e-8
+_HALF_WEIGHT: Final = 0.5
+
+
+@jax.tree_util.register_dataclass
+@jt.typed
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class DenoiserOutput:
+    """Jointly denoised 3D atomic coordinates and 2D one-hot atom/bond features."""
+
+    positions: jt.Float[jt.Array, "batch num_atoms 3"]
+    atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"]
+    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"]
 
 
 class _TransformerBlock(nn.Module):
@@ -70,7 +83,7 @@ class _TransformerBlock(nn.Module):
         )
 
         # (batch, num_heads, num_atoms, num_atoms) scaled dot-product attention logits.
-        attn_logits = jnp.einsum("bihd,bjhd->bhij", queries, keys) / jnp.sqrt(jnp.float32(head_dim))
+        attn_logits = jnp.einsum("bihd,bjhd->bhij", queries, keys) / jnp.sqrt(head_dim)
         attn_logits = attn_logits + pair_bias
         # (batch, 1, 1, num_atoms) valid-key mask broadcast across heads and query atoms.
         key_mask = atom_mask[:, None, None, :]
@@ -93,7 +106,7 @@ class _TransformerBlock(nn.Module):
 
 
 class Denoiser(nn.Module):
-    """Karras-preconditioned Transformer that predicts clean 3D molecular coordinates."""
+    """Karras-preconditioned Transformer that jointly denoises 3D coordinates and 2D graphs."""
 
     config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG
 
@@ -103,19 +116,23 @@ class Denoiser(nn.Module):
     def __call__(
         self,
         noisy_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+        noisy_atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"],
+        noisy_bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
         sigma: jt.Float[jt.Array, " batch"],
         *,
         batch: batch_lib.JaxBatch,
-    ) -> jt.Float[jt.Array, "batch num_atoms 3"]:
-        """Predicts clean, zero-centered 3D atomic coordinates from noisy coordinates.
+    ) -> DenoiserOutput:
+        """Predicts clean 3D coordinates and 2D one-hot atom/bond features from noisy inputs.
 
         Args:
             noisy_positions: Gaussian-corrupted atomic coordinates.
+            noisy_atom_features: Gaussian-corrupted one-hot atom features.
+            noisy_bond_features: Gaussian-corrupted symmetric one-hot bond features.
             sigma: Noise standard deviation per molecule.
-            batch: Padded molecular graph features and valid-atom mask.
+            batch: Padded molecular graph conditioning features and masks.
 
         Returns:
-            Denoised zero-centered atomic coordinates with padded slots zeroed.
+            Denoised zero-centered 3D coordinates and 2D atom/bond features.
         """
         transformer_config = self.config.transformer
         _LOGGER.info(
@@ -126,12 +143,25 @@ class Denoiser(nn.Module):
         )
 
         batch_size, num_atoms, _ = noisy_positions.shape
+        pair_dim = transformer_config.hidden_dim // 2
         # (batch, num_atoms, 1) expanded valid-atom mask.
         mask_3d = batch.atom_mask[..., None]
+        # (batch, num_atoms, num_atoms, 1) expanded distinct valid-pair mask (i != j).
+        pair_mask = noise_lib.off_diagonal_pair_mask(batch.atom_mask)
 
         factors = noise_lib.preconditioning_factors(sigma, config=self.config.noise)
-        # (batch, num_atoms, 3) input coordinates scaled by per-molecule c_in (batch, 1, 1).
-        scaled_positions = (factors.c_in[:, None, None] * noisy_positions) * mask_3d
+        # (batch, 1, 1) and (batch, 1, 1, 1) broadcastable input scaling factors.
+        c_in_atom = factors.c_in[:, None, None]
+        c_in_pair = factors.c_in[:, None, None, None]
+
+        scaled_positions = (c_in_atom * noisy_positions) * mask_3d
+        scaled_atoms = (c_in_atom * noisy_atom_features) * mask_3d
+        scaled_bonds = (c_in_pair * noisy_bond_features) * pair_mask
+
+        cond_atom_mask = batch.atom_cond_mask & mask_3d
+        cond_atom_features = batch.atom_features * cond_atom_mask
+        cond_bond_mask = batch.bond_cond_mask & pair_mask
+        cond_bond_features = batch.bond_features * cond_bond_mask
 
         fourier_sigma = _fourier_noise_embedding(
             sigma,
@@ -143,22 +173,30 @@ class Denoiser(nn.Module):
             nn.silu(nn.Dense(transformer_config.hidden_dim, name="sigma_mlp_0")(fourier_sigma))
         )
 
-        atom_inputs = jnp.concatenate((batch.atom_features, scaled_positions), axis=-1)
-        # (batch, num_atoms, hidden_dim) atom embeddings plus broadcast noise_cond (batch, 1, D).
+        atom_inputs = jnp.concatenate(
+            (scaled_atoms, cond_atom_features, cond_atom_mask),
+            axis=-1,
+        )
+        # (batch, num_atoms, hidden_dim) separate 2D atom and 3D coordinate projections.
         act = (
             nn.Dense(transformer_config.hidden_dim, name="atom_proj")(atom_inputs)
+            + nn.Dense(transformer_config.hidden_dim, use_bias=False, name="pos_proj")(
+                scaled_positions
+            )
             + noise_cond[:, None, :]
         ) * mask_3d
 
-        pair_inputs = _pairwise_geometry_features(
-            scaled_positions,
-            batch.bond_features,
-            batch.atom_mask,
+        geom_inputs = _pairwise_geometry_features(scaled_positions, pair_mask)
+        bond_inputs = (
+            jnp.concatenate(
+                (scaled_bonds, cond_bond_features, cond_bond_mask),
+                axis=-1,
+            )
+            * pair_mask
         )
         pair_hidden = nn.silu(
-            nn.Dense(transformer_config.hidden_dim // 2, name="pair_mlp_0")(
-                nn.LayerNorm(name="pair_norm")(pair_inputs)
-            )
+            nn.Dense(pair_dim, name="pair_mlp_0")(geom_inputs)
+            + nn.Dense(pair_dim, use_bias=False, name="pair_bond_proj")(bond_inputs)
         )
         pair_biases = nn.Dense(
             transformer_config.num_layers * transformer_config.num_heads,
@@ -181,15 +219,37 @@ class Denoiser(nn.Module):
                 atom_mask=batch.atom_mask,
             )
 
-        raw_output = nn.Dense(_SPATIAL_DIMS, name="coord_head")(
-            nn.LayerNorm(name="output_norm")(act)
+        norm_act = nn.LayerNorm(name="output_norm")(act)
+        raw_positions = nn.Dense(_SPATIAL_DIMS, name="coord_head")(norm_act)
+        raw_atoms = nn.Dense(batch_lib.NUM_ATOM_FEATURES, name="atom_head")(norm_act)
+
+        node_pair_proj = nn.Dense(pair_dim, name="pair_node_proj")(norm_act)
+        # (batch, num_atoms, num_atoms, pair_dim) symmetric pairwise activations for bond logits.
+        pair_act = nn.silu(
+            pair_hidden + node_pair_proj[:, :, None, :] + node_pair_proj[:, None, :, :]
         )
-        # (batch, num_atoms, 3) Karras skip + output combination with (batch, 1, 1) coefficients.
-        denoised_positions = (
-            factors.c_skip[:, None, None] * noisy_positions
-            + factors.c_out[:, None, None] * raw_output
+        sym_pair_act = _HALF_WEIGHT * (pair_act + jnp.swapaxes(pair_act, 1, 2))
+        raw_bonds = nn.Dense(batch_lib.NUM_BOND_FEATURES, name="bond_head")(sym_pair_act)
+        raw_bonds = _HALF_WEIGHT * (raw_bonds + jnp.swapaxes(raw_bonds, 1, 2))
+
+        # (batch, 1, 1) and (batch, 1, 1, 1) broadcastable skip and output scaling factors.
+        c_skip_atom = factors.c_skip[:, None, None]
+        c_out_atom = factors.c_out[:, None, None]
+        c_skip_pair = factors.c_skip[:, None, None, None]
+        c_out_pair = factors.c_out[:, None, None, None]
+
+        denoised_positions = geometry.zero_center_of_mass(
+            c_skip_atom * noisy_positions + c_out_atom * raw_positions,
+            batch.atom_mask,
         )
-        return geometry.zero_center_of_mass(denoised_positions, batch.atom_mask)
+        denoised_atoms = (c_skip_atom * noisy_atom_features + c_out_atom * raw_atoms) * mask_3d
+        denoised_bonds = (c_skip_pair * noisy_bond_features + c_out_pair * raw_bonds) * pair_mask
+
+        return DenoiserOutput(
+            positions=denoised_positions,
+            atom_features=denoised_atoms,
+            bond_features=denoised_bonds,
+        )
 
 
 @jt.typed
@@ -203,7 +263,7 @@ def _fourier_noise_embedding(
     """Embeds scaled log-noise levels using sinusoidal log-spaced frequencies."""
     half_dim = embedding_dim // 2
     c_noise = config.log_sigma_scale * jnp.log(sigma / sigma_data)
-    freq_exponents = jnp.linspace(0.0, 1.0, half_dim, dtype=jnp.float32)
+    freq_exponents = jnp.linspace(0.0, 1.0, half_dim)
     frequencies = jnp.exp(-jnp.log(config.max_period) * freq_exponents)
     # (batch, half_dim) outer product of c_noise (batch, 1) and frequencies (1, half_dim).
     angles = c_noise[:, None] * frequencies[None, :]
@@ -213,14 +273,11 @@ def _fourier_noise_embedding(
 @jt.typed
 def _pairwise_geometry_features(
     scaled_positions: jt.Float[jt.Array, "batch num_atoms 3"],
-    bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
-    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
-) -> jt.Float[jt.Array, "batch num_atoms num_atoms num_pair_features"]:
-    """Combines 2D bond features with 3D pairwise displacements and Euclidean distances."""
-    # (batch, num_atoms, num_atoms, 1) pairwise valid-atom mask.
-    pair_mask = (atom_mask[:, :, None] & atom_mask[:, None, :])[..., None]
+    pair_mask: jt.Bool[jt.Array, "batch num_atoms num_atoms 1"],
+) -> jt.Float[jt.Array, "batch num_atoms num_atoms 4"]:
+    """Computes masked 3D pairwise displacement vectors and Euclidean distances."""
     # (batch, num_atoms, num_atoms, 3) pairwise displacement vectors x_i - x_j.
     offsets = scaled_positions[:, :, None, :] - scaled_positions[:, None, :, :]
     # (batch, num_atoms, num_atoms, 1) pairwise Euclidean distances ||x_i - x_j||.
     distances = jnp.sqrt(jnp.sum(jnp.square(offsets), axis=-1, keepdims=True) + _DIST_EPS)
-    return jnp.concatenate((bond_features, offsets, distances), axis=-1) * pair_mask
+    return jnp.concatenate((offsets, distances), axis=-1) * pair_mask

@@ -1,6 +1,6 @@
 """In-memory data source that pre-collates a Parquet split and yields batches."""
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 import enum
 import itertools
 import logging
@@ -113,6 +113,8 @@ class DataSource:
                 bond_features=self._dataset.bond_features[batch_indices],
                 atom_mask=self._dataset.atom_mask[batch_indices],
                 positions=self._dataset.positions[batch_indices],
+                atom_cond_mask=self._dataset.atom_cond_mask[batch_indices],
+                bond_cond_mask=self._dataset.bond_cond_mask[batch_indices],
             )
 
 
@@ -129,11 +131,17 @@ def _concatenate_batches(batches: Sequence[batch.Batch]) -> batch.Batch:
         ),
         atom_mask=np.concatenate(tuple(sub_batch.atom_mask for sub_batch in batches), axis=0),
         positions=np.concatenate(tuple(sub_batch.positions for sub_batch in batches), axis=0),
+        atom_cond_mask=np.concatenate(
+            tuple(sub_batch.atom_cond_mask for sub_batch in batches), axis=0
+        ),
+        bond_cond_mask=np.concatenate(
+            tuple(sub_batch.bond_cond_mask for sub_batch in batches), axis=0
+        ),
     )
 
 
 def _collate_molecules(
-    molecules: Sequence[schema.Molecule],
+    molecules: Collection[schema.Molecule],
     *,
     max_atoms: int,
     max_workers: int = _MAX_WORKERS,
@@ -169,15 +177,27 @@ def _load_cached_batch(cache_path: pathlib.Path, *, max_atoms: int) -> batch.Bat
             return None
         atom_features = archive[_CacheKey.ATOM_FEATURES]
         bond_features = archive[_CacheKey.BOND_FEATURES]
-        if atom_features.shape[1:] != (max_atoms, batch.NUM_ATOM_FEATURES):
+        _, cached_max_atoms, cached_num_atom_features = atom_features.shape
+        if cached_max_atoms != max_atoms or cached_num_atom_features != batch.NUM_ATOM_FEATURES:
             return None
-        if bond_features.shape[1:] != (max_atoms, max_atoms, batch.NUM_BOND_FEATURES):
+        _, bond_atoms_i, bond_atoms_j, cached_num_bond_features = bond_features.shape
+        if (
+            bond_atoms_i != max_atoms
+            or bond_atoms_j != max_atoms
+            or cached_num_bond_features != batch.NUM_BOND_FEATURES
+        ):
             return None
+        atom_mask = archive[_CacheKey.ATOM_MASK]
+        atom_cond_mask = np.broadcast_to(atom_mask[..., None], atom_features.shape).copy()
+        pair_mask = atom_mask[:, :, None] & atom_mask[:, None, :]
+        bond_cond_mask = np.broadcast_to(pair_mask[..., None], bond_features.shape).copy()
         return batch.Batch(
             atom_features=atom_features,
             bond_features=bond_features,
-            atom_mask=archive[_CacheKey.ATOM_MASK],
+            atom_mask=atom_mask,
             positions=archive[_CacheKey.POSITIONS],
+            atom_cond_mask=atom_cond_mask,
+            bond_cond_mask=bond_cond_mask,
         )
 
 

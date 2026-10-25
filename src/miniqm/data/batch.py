@@ -5,7 +5,8 @@ import dataclasses
 import enum
 import functools
 import itertools
-from typing import Final, override
+import re
+from typing import Final, cast, override
 
 import jax
 import jax.numpy as jnp
@@ -20,6 +21,9 @@ MAX_ATOMS: Final = 9
 _SPATIAL_DIMS: Final = 3
 _MAX_COVALENT_BOND_A: Final = 2.1
 _CIP_CODE_PROP: Final = "_CIPCode"
+_UNSPECIFIED_BOND_PROP: Final = "_UnspecifiedBond"
+_BARE_URANIUM_PATTERN: Final = re.compile(r"(?<!\[)U(?!\])")
+_MASKED_LOGIT: Final = -1e9
 
 _ELEMENTS: Final = (6, 7, 8, 9)
 _DEGREES: Final = (1, 2, 3, 4)
@@ -37,6 +41,11 @@ _BOND_TYPES: Final = (
     Chem.BondType.TRIPLE,
     Chem.BondType.AROMATIC,
 )
+_ELEMENT_SLICE: Final = slice(0, len(_ELEMENTS))
+_CHARGE_START: Final = len(_ELEMENTS) + (len(_DEGREES) + 1) + len(_TOTAL_HS)
+_CHARGE_SLICE: Final = slice(_CHARGE_START, _CHARGE_START + len(_FORMAL_CHARGES))
+_RING_INDEX: Final = _CHARGE_START + len(_FORMAL_CHARGES) + (len(_HYBRIDIZATIONS) + 1) + 1
+_CHIRAL_SLICE: Final = slice(_RING_INDEX + 1, _RING_INDEX + 1 + len(_CHIRAL_CODES) + 1)
 NUM_ATOM_FEATURES: Final = (
     len(_ELEMENTS)
     + (len(_DEGREES) + 1)
@@ -61,10 +70,12 @@ class SdfProperty(enum.StrEnum):
 @jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class GraphFeatures:
-    """Unpadded 2D molecular graph features derived from a SMILES structure."""
+    """Unpadded 2D molecular graph features and per-channel conditioning masks."""
 
     atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"]
     bond_features: jt.Float[np.ndarray, "num_atoms num_atoms num_bond_features"]
+    atom_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atom_features"]
+    bond_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atoms num_bond_features"]
 
     __hash__ = None
 
@@ -72,8 +83,11 @@ class GraphFeatures:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GraphFeatures):
             return NotImplemented
-        return np.array_equal(self.atom_features, other.atom_features) and np.array_equal(
-            self.bond_features, other.bond_features
+        return (
+            np.array_equal(self.atom_features, other.atom_features)
+            and np.array_equal(self.bond_features, other.bond_features)
+            and np.array_equal(self.atom_cond_mask, other.atom_cond_mask)
+            and np.array_equal(self.bond_cond_mask, other.bond_cond_mask)
         )
 
 
@@ -81,23 +95,27 @@ class GraphFeatures:
 @jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class JaxBatch:
-    """Padded JAX batch of 2D molecular graphs and zero-centered 3D coordinates."""
+    """Padded JAX batch of 2D molecular graphs, conditioning masks, and 3D coordinates."""
 
     atom_features: jt.Float[jt.Array, "batch max_atoms num_atom_features"]
     bond_features: jt.Float[jt.Array, "batch max_atoms max_atoms num_bond_features"]
     atom_mask: jt.Bool[jt.Array, "batch max_atoms"]
     positions: jt.Float[jt.Array, "batch max_atoms 3"]
+    atom_cond_mask: jt.Bool[jt.Array, "batch max_atoms num_atom_features"]
+    bond_cond_mask: jt.Bool[jt.Array, "batch max_atoms max_atoms num_bond_features"]
 
 
 @jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class Batch:
-    """Padded NumPy batch of 2D molecular graphs and zero-centered 3D coordinates."""
+    """Padded NumPy batch of 2D molecular graphs, conditioning masks, and 3D coordinates."""
 
     atom_features: jt.Float[np.ndarray, "batch max_atoms num_atom_features"]
     bond_features: jt.Float[np.ndarray, "batch max_atoms max_atoms num_bond_features"]
     atom_mask: jt.Bool[np.ndarray, "batch max_atoms"]
     positions: jt.Float[np.ndarray, "batch max_atoms 3"]
+    atom_cond_mask: jt.Bool[np.ndarray, "batch max_atoms num_atom_features"]
+    bond_cond_mask: jt.Bool[np.ndarray, "batch max_atoms max_atoms num_bond_features"]
 
     __hash__ = None
 
@@ -110,6 +128,8 @@ class Batch:
             and np.array_equal(self.bond_features, other.bond_features)
             and np.array_equal(self.atom_mask, other.atom_mask)
             and np.allclose(self.positions, other.positions)
+            and np.array_equal(self.atom_cond_mask, other.atom_cond_mask)
+            and np.array_equal(self.bond_cond_mask, other.bond_cond_mask)
         )
 
     def to_jax(self) -> JaxBatch:
@@ -119,6 +139,8 @@ class Batch:
             bond_features=jnp.asarray(self.bond_features),
             atom_mask=jnp.asarray(self.atom_mask),
             positions=jnp.asarray(self.positions),
+            atom_cond_mask=jnp.asarray(self.atom_cond_mask),
+            bond_cond_mask=jnp.asarray(self.bond_cond_mask),
         )
 
 
@@ -163,49 +185,106 @@ def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
 
 def _strip_hydrogens_preserving_cip(mol: Chem.Mol) -> Chem.Mol:
     """Removes explicit hydrogens while preserving 3D-perceived CIP codes on heavy atoms."""
+    atoms = tuple(mol.GetAtoms())
+    heavy_atoms = tuple(itertools.compress(atoms, (atom.GetAtomicNum() > 1 for atom in atoms)))
     heavy_cip_codes = tuple(
-        atom.GetProp(_CIP_CODE_PROP) if atom.HasProp(_CIP_CODE_PROP) else ""
-        for atom in mol.GetAtoms()
-        if atom.GetAtomicNum() > 1
+        atom.GetProp(_CIP_CODE_PROP) if atom.HasProp(_CIP_CODE_PROP) else "" for atom in heavy_atoms
     )
-    heavy_mol = Chem.RemoveHs(mol)
+    heavy_mol = Chem.RemoveAllHs(mol)
     for atom, cip_code in zip(heavy_mol.GetAtoms(), heavy_cip_codes, strict=True):
         if cip_code:
             atom.SetProp(_CIP_CODE_PROP, cip_code)
     return heavy_mol
 
 
+def _atom_touches_unknown(atom: Chem.Atom, is_dummy: Sequence[bool]) -> bool:
+    """Returns True if an atom has a dummy neighbor or an unspecified (~) incident bond."""
+    atom_idx = atom.GetIdx()
+    return any(
+        bond.HasProp(_UNSPECIFIED_BOND_PROP) or is_dummy[bond.GetOtherAtomIdx(atom_idx)]
+        for bond in atom.GetBonds()
+    )
+
+
+def _build_atom_cond_mask(
+    atom: Chem.Atom,
+    *,
+    is_dummy: Sequence[bool],
+) -> np.ndarray:
+    """Builds the 1D boolean conditioning mask for a single heavy atom."""
+    atom_idx = atom.GetIdx()
+    if is_dummy[atom_idx]:
+        return np.zeros((NUM_ATOM_FEATURES,), dtype=np.bool_)
+    if not _atom_touches_unknown(atom, is_dummy):
+        return np.ones((NUM_ATOM_FEATURES,), dtype=np.bool_)
+
+    mask = np.zeros((NUM_ATOM_FEATURES,), dtype=np.bool_)
+    mask[_ELEMENT_SLICE] = True
+    mask[_CHARGE_SLICE] = True
+    if atom.IsInRing():
+        mask[_RING_INDEX - 1 : _RING_INDEX + 1] = True
+    if atom.HasProp(_CIP_CODE_PROP):
+        mask[_CHIRAL_SLICE] = True
+    return mask
+
+
 def _featurize_rdkit_mol(mol: Chem.Mol) -> GraphFeatures:
-    """Extracts heavy-atom and bond feature arrays from an RDKit molecule."""
+    """Extracts heavy-atom and bond feature arrays and conditioning masks from an RDKit molecule."""
     if mol.GetNumConformers() > 0:
         Chem.AssignStereochemistryFrom3D(mol)
     else:
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
     heavy_mol = _strip_hydrogens_preserving_cip(mol)
     num_atoms = heavy_mol.GetNumAtoms()
+    atoms = tuple(heavy_mol.GetAtoms())
+    is_dummy = tuple(atom.GetAtomicNum() not in _ELEMENTS for atom in atoms)
 
-    atom_features = np.array(
-        tuple(_encode_atom(atom) for atom in heavy_mol.GetAtoms()),
-        dtype=np.float32,
-    )
+    atom_features = np.zeros((num_atoms, NUM_ATOM_FEATURES), dtype=np.float32)
+    atom_cond_mask = np.zeros((num_atoms, NUM_ATOM_FEATURES), dtype=np.bool_)
+    for atom_idx, atom in enumerate(atoms):
+        atom_cond_mask[atom_idx] = _build_atom_cond_mask(atom, is_dummy=is_dummy)
+        if not is_dummy[atom_idx]:
+            atom_features[atom_idx] = np.asarray(_encode_atom(atom), dtype=np.float32)
 
-    num_bond_types = len(_BOND_TYPES)
     # Channels: [NONE, SINGLE, DOUBLE, TRIPLE, AROMATIC, is_in_ring].
-    bond_features = np.zeros((num_atoms, num_atoms, num_bond_types + 2), dtype=np.float32)
-    bond_features[:, :, 0] = 1.0
+    bond_features = np.zeros((num_atoms, num_atoms, NUM_BOND_FEATURES), dtype=np.float32)
+    bond_cond_mask = np.zeros((num_atoms, num_atoms, NUM_BOND_FEATURES), dtype=np.bool_)
+    known_atom_mask = ~np.asarray(is_dummy, dtype=np.bool_)
+    known_pair_mask = (known_atom_mask[:, None] & known_atom_mask[None, :]) | np.eye(
+        num_atoms, dtype=np.bool_
+    )
+    bond_features[known_pair_mask, 0] = 1.0
+    bond_cond_mask[known_pair_mask, :] = True
 
     for bond in heavy_mol.GetBonds():
         begin_idx = bond.GetBeginAtomIdx()
         end_idx = bond.GetEndAtomIdx()
-        bond_channel_values = (
-            0.0,
-            *_one_hot(bond.GetBondType(), _BOND_TYPES),
-            1.0 if bond.IsInRing() else 0.0,
-        )
-        bond_features[begin_idx, end_idx] = bond_channel_values
-        bond_features[end_idx, begin_idx] = bond_channel_values
+        if bond.HasProp(_UNSPECIFIED_BOND_PROP):
+            unspecified_values = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            unspecified_mask = (True, False, False, False, False, False)
+            bond_features[begin_idx, end_idx] = unspecified_values
+            bond_features[end_idx, begin_idx] = unspecified_values
+            bond_cond_mask[begin_idx, end_idx] = unspecified_mask
+            bond_cond_mask[end_idx, begin_idx] = unspecified_mask
+        else:
+            bond_channel_values = (
+                0.0,
+                *_one_hot(bond.GetBondType(), _BOND_TYPES),
+                1.0 if bond.IsInRing() else 0.0,
+            )
+            ring_known = (not is_dummy[begin_idx] and not is_dummy[end_idx]) or bond.IsInRing()
+            known_bond_mask = (True, True, True, True, True, ring_known)
+            bond_features[begin_idx, end_idx] = bond_channel_values
+            bond_features[end_idx, begin_idx] = bond_channel_values
+            bond_cond_mask[begin_idx, end_idx] = known_bond_mask
+            bond_cond_mask[end_idx, begin_idx] = known_bond_mask
 
-    return GraphFeatures(atom_features=atom_features, bond_features=bond_features)
+    return GraphFeatures(
+        atom_features=atom_features,
+        bond_features=bond_features,
+        atom_cond_mask=atom_cond_mask,
+        bond_cond_mask=bond_cond_mask,
+    )
 
 
 def _mol_from_smiles(smiles: str) -> Chem.Mol | None:
@@ -216,19 +295,56 @@ def _mol_from_smiles(smiles: str) -> Chem.Mol | None:
     return mol
 
 
+def _parse_template_smiles(smiles: str) -> Chem.Mol | None:
+    """Parses a SMILES or template string supporting U/* dummy atoms and ~ dummy bonds."""
+    normalized = _BARE_URANIUM_PATTERN.sub("[U]", smiles)
+    if "~" not in normalized:
+        return _mol_from_smiles(normalized)
+
+    _disable_rdkit_logging()
+    smarts_mol = cast("Chem.Mol | None", Chem.MolFromSmarts(normalized))
+    mol = cast(
+        "Chem.Mol | None",
+        Chem.MolFromSmiles(normalized.replace("~", "-"), sanitize=False),
+    )
+    if smarts_mol is None or mol is None or smarts_mol.GetNumAtoms() != mol.GetNumAtoms():
+        return None
+    for smarts_bond in smarts_mol.GetBonds():
+        if smarts_bond.GetBondType() == Chem.BondType.UNSPECIFIED:
+            mol_bond = cast(
+                "Chem.Bond | None",
+                mol.GetBondBetweenAtoms(
+                    smarts_bond.GetBeginAtomIdx(),
+                    smarts_bond.GetEndAtomIdx(),
+                ),
+            )
+            if mol_bond is not None:
+                mol_bond.SetIntProp(_UNSPECIFIED_BOND_PROP, 1)
+                if (
+                    mol_bond.GetBeginAtom().GetIsAromatic()
+                    and mol_bond.GetEndAtom().GetIsAromatic()
+                ):
+                    mol_bond.SetBondType(Chem.BondType.AROMATIC)
+    if Chem.SanitizeMol(mol, catchErrors=True) != Chem.SanitizeFlags.SANITIZE_NONE:
+        return None
+    return mol
+
+
 def featurize_smiles(smiles: str) -> GraphFeatures:
-    """Computes unpadded heavy-atom 2D atom and bond features directly from a SMILES string.
+    """Computes unpadded heavy-atom 2D features and conditioning masks from a SMILES or template.
+
+    Supports dummy atoms (U or *) and unspecified bonds (~).
 
     Args:
-        smiles: Input SMILES string.
+        smiles: Input SMILES or template string.
 
     Returns:
-        Unpadded heavy-atom and bond feature arrays.
+        Unpadded heavy-atom and bond feature arrays with per-channel conditioning masks.
 
     Raises:
-        ValueError: If the SMILES string cannot be parsed by RDKit.
+        ValueError: If the SMILES or template string cannot be parsed by RDKit.
     """
-    base_mol = _mol_from_smiles(smiles)
+    base_mol = _parse_template_smiles(smiles)
     if base_mol is None:
         raise ValueError(f"Failed to parse SMILES {smiles!r}.")
     return _featurize_rdkit_mol(base_mol)
@@ -358,10 +474,12 @@ def _build_candidate_mols(molecule: schema.Molecule) -> tuple[Chem.Mol, ...]:
 def _parse_aligned_mol(molecule: schema.Molecule) -> Chem.Mol:
     """Parses a SMILES string and renumbers its atoms to match XYZ coordinate order."""
     xyz_atomic_numbers = tuple(int(atomic_num) for atomic_num in molecule.atomic_numbers)
-    xyz_heavy_indices: list[int] = []
-    for xyz_idx, atomic_num in enumerate(xyz_atomic_numbers):
-        if atomic_num > 1:
-            xyz_heavy_indices.append(xyz_idx)
+    xyz_heavy_indices = tuple(
+        itertools.compress(
+            range(len(xyz_atomic_numbers)),
+            (atomic_num > 1 for atomic_num in xyz_atomic_numbers),
+        )
+    )
 
     candidate_mols = _build_candidate_mols(molecule)
     if not candidate_mols:
@@ -446,6 +564,8 @@ def _pad_graph_features(
     )
     atom_mask = np.zeros((batch_size, max_atoms), dtype=np.bool_)
     positions = np.zeros((batch_size, max_atoms, _SPATIAL_DIMS), dtype=np.float32)
+    atom_cond_mask = np.zeros((batch_size, max_atoms, num_atom_features), dtype=np.bool_)
+    bond_cond_mask = np.zeros((batch_size, max_atoms, max_atoms, num_bond_features), dtype=np.bool_)
 
     for batch_idx, graph in enumerate(graphs):
         num_atoms, _ = graph.atom_features.shape
@@ -456,12 +576,16 @@ def _pad_graph_features(
         atom_features[batch_idx, :num_atoms] = graph.atom_features
         bond_features[batch_idx, :num_atoms, :num_atoms] = graph.bond_features
         atom_mask[batch_idx, :num_atoms] = True
+        atom_cond_mask[batch_idx, :num_atoms] = graph.atom_cond_mask
+        bond_cond_mask[batch_idx, :num_atoms, :num_atoms] = graph.bond_cond_mask
 
     return Batch(
         atom_features=atom_features,
         bond_features=bond_features,
         atom_mask=atom_mask,
         positions=positions,
+        atom_cond_mask=atom_cond_mask,
+        bond_cond_mask=bond_cond_mask,
     )
 
 
@@ -470,14 +594,14 @@ def collate_smiles(
     *,
     max_atoms: int = MAX_ATOMS,
 ) -> Batch:
-    """Featurizes and pads a collection of SMILES strings into a fixed-shape batch.
+    """Featurizes and pads a collection of SMILES or template strings into a fixed-shape batch.
 
     Args:
-        smiles: Non-empty collection of SMILES strings.
+        smiles: Non-empty collection of SMILES or template strings.
         max_atoms: Padded atom dimension.
 
     Returns:
-        Padded batch of 2D graph features and valid-atom masks for conformer generation.
+        Padded batch of 2D graph features, conditioning masks, and valid-atom masks.
 
     Raises:
         ValueError: If smiles is empty or a molecule exceeds max_atoms.
@@ -486,6 +610,110 @@ def collate_smiles(
         raise ValueError("Expected non-empty sequence of SMILES strings to collate.")
     graphs = tuple(featurize_smiles(smi) for smi in smiles)
     return _pad_graph_features(graphs, max_atoms=max_atoms)
+
+
+def _build_raw_generated_mol(
+    valid_indices: Iterable[int],
+    atom_features: np.ndarray,
+    bond_features: np.ndarray,
+    *,
+    allow_aromatic: bool,
+) -> Chem.Mol:
+    """Constructs an unsanitized RDKit molecule from decoded atom and bond argmaxes."""
+    rw_mol = Chem.RWMol()
+    indexed_atoms = tuple(enumerate(int(idx) for idx in valid_indices))
+    for _, atom_idx in indexed_atoms:
+        element_idx = int(np.argmax(atom_features[atom_idx, _ELEMENT_SLICE]))
+        charge_idx = int(np.argmax(atom_features[atom_idx, _CHARGE_SLICE]))
+        rd_atom = Chem.Atom(_ELEMENTS[element_idx])
+        rd_atom.SetFormalCharge(_FORMAL_CHARGES[charge_idx])
+        rw_mol.AddAtom(rd_atom)
+
+    num_bond_classes = len(_BOND_TYPES) + 1
+    for (dst_i, src_i), (dst_j, src_j) in itertools.combinations(indexed_atoms, 2):
+        pair_logits = 0.5 * (
+            bond_features[src_i, src_j, :num_bond_classes]
+            + bond_features[src_j, src_i, :num_bond_classes]
+        )
+        bond_class = int(np.argmax(pair_logits))
+        if bond_class > 0:
+            bond_type = _BOND_TYPES[bond_class - 1]
+            if not allow_aromatic and bond_type == Chem.BondType.AROMATIC:
+                bond_type = Chem.BondType.SINGLE
+            rw_mol.AddBond(dst_i, dst_j, bond_type)
+    return rw_mol.GetMol()
+
+
+@jt.typed
+def build_generated_mol(
+    positions: jt.Float[np.ndarray, "max_atoms 3"],
+    atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"],
+    atom_mask: jt.Bool[np.ndarray, " max_atoms"],
+    *,
+    cond_atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "max_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "max_atoms max_atoms num_bond_features"] | None = None,
+    prompt_smiles: str = "",
+) -> Chem.Mol:
+    """Reconstructs a heavy-atom RDKit molecule and 3D conformer from predicted graph features.
+
+    Args:
+        positions: Padded 3D coordinates in Angstroms.
+        atom_features: Padded per-atom continuous/one-hot feature matrix.
+        bond_features: Padded pairwise continuous/one-hot bond feature tensor.
+        atom_mask: Valid-atom mask.
+        cond_atom_features: Optional ground-truth or template atom feature matrix.
+        atom_cond_mask: Optional boolean mask of conditioned atom feature channels.
+        cond_bond_features: Optional ground-truth or template bond feature tensor.
+        bond_cond_mask: Optional boolean mask of conditioned bond feature channels.
+        prompt_smiles: Optional molecule name/template identifier for SDF properties.
+
+    Returns:
+        RDKit molecule with decoded atom types, bond orders, and 3D conformer attached.
+    """
+    _disable_rdkit_logging()
+    effective_atoms = (
+        np.where(
+            atom_cond_mask,
+            np.where(cond_atom_features > 0.0, 1.0, _MASKED_LOGIT),
+            atom_features,
+        )
+        if cond_atom_features is not None and atom_cond_mask is not None
+        else atom_features
+    )
+    effective_bonds = (
+        np.where(
+            bond_cond_mask,
+            np.where(cond_bond_features > 0.0, 1.0, _MASKED_LOGIT),
+            bond_features,
+        )
+        if cond_bond_features is not None and bond_cond_mask is not None
+        else bond_features
+    )
+    valid_indices = np.flatnonzero(atom_mask)
+    mol = _build_raw_generated_mol(
+        valid_indices,
+        effective_atoms,
+        effective_bonds,
+        allow_aromatic=True,
+    )
+    if Chem.SanitizeMol(mol, catchErrors=True) != Chem.SanitizeFlags.SANITIZE_NONE:
+        mol = _build_raw_generated_mol(
+            valid_indices,
+            effective_atoms,
+            effective_bonds,
+            allow_aromatic=False,
+        )
+        Chem.SanitizeMol(mol, catchErrors=True)
+    _attach_3d_conformer(mol, positions[valid_indices])
+    if mol.GetNumAtoms() > 0:
+        Chem.AssignStereochemistryFrom3D(mol)
+    resolved_smiles = Chem.MolToSmiles(mol) if mol.GetNumAtoms() > 0 else prompt_smiles
+    mol.SetProp(SdfProperty.NAME, prompt_smiles or resolved_smiles)
+    mol.SetProp(SdfProperty.SMILES, resolved_smiles)
+    return mol
 
 
 @jt.typed
@@ -505,10 +733,10 @@ def build_conformer_mol(
     Raises:
         ValueError: If the SMILES string is invalid or has more heavy atoms than positions.
     """
-    base_mol = _mol_from_smiles(smiles)
+    base_mol = _parse_template_smiles(smiles)
     if base_mol is None:
         raise ValueError(f"Failed to parse SMILES {smiles!r}.")
-    heavy_mol = Chem.RemoveHs(base_mol)
+    heavy_mol = Chem.RemoveAllHs(base_mol)
     num_atoms = heavy_mol.GetNumAtoms()
     max_atoms, _ = positions.shape
     if num_atoms > max_atoms:

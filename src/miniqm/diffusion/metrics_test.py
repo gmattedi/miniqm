@@ -18,7 +18,6 @@ def test_rmsd_per_molecule_is_zero_under_proper_rotation():
                 [0.0, 0.0, 0.0],
             ]
         ],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array([[True, True, True, True, False]], dtype=jnp.bool_)
     target_positions = geometry.zero_center_of_mass(raw_positions, atom_mask)
@@ -49,11 +48,9 @@ def test_lddt_per_molecule_scores_distance_errors_across_thresholds(
 ):
     target_positions = jnp.array(
         [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
-        dtype=jnp.float32,
     )
     predicted_positions = jnp.array(
         [[[0.0, 0.0, 0.0], [stretched_x, 0.0, 0.0], [99.0, 0.0, 0.0]]],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array([[True, True, False]], dtype=jnp.bool_)
 
@@ -97,7 +94,7 @@ def test_stereocenter_violations_detects_enantiomer_inversion(
         target_positions,
         jax_batch.atom_mask,
     )
-    predicted_positions = rotated_positions * jnp.array([1.0, 1.0, z_scale], dtype=jnp.float32)
+    predicted_positions = rotated_positions * jnp.array([1.0, 1.0, z_scale])
 
     stats = metrics.stereocenter_violations(
         predicted_positions=predicted_positions,
@@ -113,9 +110,9 @@ def test_stereocenter_violations_detects_enantiomer_inversion(
 
 
 def test_stereocenter_violations_handles_fewer_than_four_atoms():
-    positions = jnp.zeros((1, 3, 3), dtype=jnp.float32)
-    atom_features = jnp.zeros((1, 3, batch_lib.NUM_ATOM_FEATURES), dtype=jnp.float32)
-    bond_features = jnp.zeros((1, 3, 3, batch_lib.NUM_BOND_FEATURES), dtype=jnp.float32)
+    positions = jnp.zeros((1, 3, 3))
+    atom_features = jnp.zeros((1, 3, batch_lib.NUM_ATOM_FEATURES))
+    bond_features = jnp.zeros((1, 3, 3, batch_lib.NUM_BOND_FEATURES))
     atom_mask = jnp.ones((1, 3), dtype=jnp.bool_)
 
     stats = metrics.stereocenter_violations(

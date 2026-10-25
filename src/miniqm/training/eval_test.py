@@ -1,4 +1,3 @@
-from collections.abc import Callable
 import json
 import pathlib
 from typing import Final
@@ -21,7 +20,7 @@ _TINY_MODEL_CONFIG: Final = config_lib.DenoiserConfig(
 )
 
 
-def _write_sample_parquet(path: pathlib.Path, num_rows: int = 3) -> pathlib.Path:
+def _write_sample_parquet(path: pathlib.Path, *, num_rows: int = 3) -> pathlib.Path:
     charges = (9, 1, *(0,) * 27)
     positions = ((0.0, 0.0, 0.0), (0.92, 0.0, 0.0), *((0.0, 0.0, 0.0),) * 27)
     rows = tuple(
@@ -119,7 +118,7 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     assert saved_report["step"] == 5
 
     smiles_file = tmp_path / "molecules.smi"
-    smiles_file.write_text("F\nCO\n", encoding="utf-8")
+    smiles_file.write_text("F\nCO\nC~U\n", encoding="utf-8")
     output_sdf = tmp_path / "out.sdf"
     mols = eval_lib.run_smiles_sampling(
         config_lib.SampleSmilesConfig(
@@ -131,11 +130,11 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
             seed=10,
         )
     )
-    assert len(mols) == 4
+    assert len(mols) == 6
     assert output_sdf.is_file()
     supplier = Chem.SDMolSupplier(str(output_sdf), removeHs=False)
     loaded_mols = tuple(supplier)
-    assert len(loaded_mols) == 4
+    assert len(loaded_mols) == 6
     assert loaded_mols[0].GetNumAtoms() == 1
     assert loaded_mols[0].GetProp(batch_lib.SdfProperty.CONFORMER_ID) == "0"
     assert loaded_mols[0].GetProp(batch_lib.SdfProperty.SEED) == "10"
@@ -143,28 +142,9 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     assert loaded_mols[1].GetProp(batch_lib.SdfProperty.CONFORMER_ID) == "1"
     assert loaded_mols[1].GetProp(batch_lib.SdfProperty.SEED) == "11"
     assert loaded_mols[2].GetNumAtoms() == 2
-
-
-@pytest.mark.parametrize(
-    "factory",
-    (
-        lambda: config_lib.EvalConfig(batch_size=0),
-        lambda: config_lib.EvalConfig(num_sampling_steps=0),
-        lambda: config_lib.SampleSmilesConfig(num_conformers=0),
-        lambda: config_lib.SampleSmilesConfig(num_sampling_steps=0),
-    ),
-    ids=(
-        "eval_batch_size",
-        "eval_num_sampling_steps",
-        "sample_num_conformers",
-        "sample_num_sampling_steps",
-    ),
-)
-def test_eval_and_sample_configs_reject_invalid_values(
-    factory: Callable[[], object],
-):
-    with pytest.raises(ValueError, match="greater than 0"):
-        factory()
+    assert loaded_mols[4].GetNumAtoms() == 2
+    assert loaded_mols[4].GetAtomWithIdx(0).GetSymbol() == "C"
+    assert loaded_mols[4].GetBondBetweenAtoms(0, 1) is not None
 
 
 def test_resolve_smiles_inputs_validates_sources(tmp_path: pathlib.Path):

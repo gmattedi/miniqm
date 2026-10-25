@@ -37,6 +37,8 @@ class ValidationMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
     total_loss: float
     aligned_mse_loss: float
     distance_loss: float
+    atom_loss: float
+    bond_loss: float
     rmsd: float
 
 
@@ -92,20 +94,31 @@ def compute_batch_loss(
     model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
     loss_config: config_lib.LossConfig = config_lib.DEFAULT_LOSS_CONFIG,
 ) -> losses_lib.LossOutput:
-    """Runs the denoiser on a corrupted sample and evaluates the diffusion loss."""
+    """Runs the denoiser on a corrupted sample and evaluates the joint 2D+3D diffusion loss."""
     denoiser = model_lib.Denoiser(config=model_config)
-    predicted_positions = cast(
-        "jt.Float[jt.Array, 'batch num_atoms 3']",
+    conditioned_batch = dataclasses.replace(
+        batch,
+        atom_cond_mask=noisy_sample.atom_cond_mask,
+        bond_cond_mask=noisy_sample.bond_cond_mask,
+    )
+    denoised = cast(
+        "model_lib.DenoiserOutput",
         denoiser.apply(
             params,
             noisy_sample.noisy_positions,
+            noisy_sample.noisy_atom_features,
+            noisy_sample.noisy_bond_features,
             noisy_sample.sigma,
-            batch=batch,
+            batch=conditioned_batch,
         ),
     )
     return losses_lib.compute_diffusion_loss(
-        predicted_positions=predicted_positions,
+        predicted_positions=denoised.positions,
         target_positions=noisy_sample.target_positions,
+        predicted_atom_features=denoised.atom_features,
+        target_atom_features=noisy_sample.target_atom_features,
+        predicted_bond_features=denoised.bond_features,
+        target_bond_features=noisy_sample.target_bond_features,
         sigma=noisy_sample.sigma,
         atom_mask=batch.atom_mask,
         config=loss_config,
@@ -136,9 +149,9 @@ def eval_step(
     """
     noisy_sample = noise_lib.make_noisy_sample(
         rng,
-        batch.positions,
-        batch.atom_mask,
+        batch,
         config=model_config.noise,
+        sample_cond_masks=False,
     )
     return compute_batch_loss(
         params,
@@ -221,6 +234,12 @@ def evaluate_loss(
         ),
         distance_loss=float(
             np.average(tuple(float(out.distance_loss) for out, _ in batch_outputs), weights=weights)
+        ),
+        atom_loss=float(
+            np.average(tuple(float(out.atom_loss) for out, _ in batch_outputs), weights=weights)
+        ),
+        bond_loss=float(
+            np.average(tuple(float(out.bond_loss) for out, _ in batch_outputs), weights=weights)
         ),
         rmsd=float(np.average(tuple(float(out.rmsd) for out, _ in batch_outputs), weights=weights)),
     )
@@ -366,8 +385,8 @@ def evaluate_dataset_sampling(
                 model_config=model_config,
                 sampling_config=sampling_config,
             )
-            rmsd_chunks.append(np.asarray(stats.rmsd, dtype=np.float32))
-            lddt_chunks.append(np.asarray(stats.lddt, dtype=np.float32))
+            rmsd_chunks.append(np.asarray(stats.rmsd))
+            lddt_chunks.append(np.asarray(stats.lddt))
             total_violations += int(jnp.sum(stats.num_stereo_violations))
             total_stereocenters += int(jnp.sum(stats.num_stereocenters))
             progress_bar.advance(task_id)
@@ -474,12 +493,36 @@ def _resolve_smiles_inputs(config: config_lib.SampleSmilesConfig) -> tuple[str, 
 def _build_tagged_conformer(
     smiles: str,
     positions: jt.Float[np.ndarray, "max_atoms 3"],
+    atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"],
+    host_batch: batch_lib.Batch,
     *,
+    mol_idx: int,
     conformer_idx: int,
     seed: int,
 ) -> Chem.Mol:
     """Builds a 3D conformer molecule annotated with its conformer index and PRNG seed."""
-    mol = batch_lib.build_conformer_mol(smiles, positions)
+    atom_mask = host_batch.atom_mask[mol_idx]
+    atom_cond_mask = host_batch.atom_cond_mask[mol_idx]
+    bond_cond_mask = host_batch.bond_cond_mask[mol_idx]
+    pair_valid = atom_mask[:, None] & atom_mask[None, :] & ~np.eye(atom_mask.size, dtype=np.bool_)
+    is_fully_conditioned = bool(
+        np.all(atom_cond_mask[atom_mask]) and np.all(bond_cond_mask[pair_valid])
+    )
+    if is_fully_conditioned:
+        mol = batch_lib.build_conformer_mol(smiles, positions)
+    else:
+        mol = batch_lib.build_generated_mol(
+            positions,
+            atom_features,
+            bond_features,
+            atom_mask,
+            cond_atom_features=host_batch.atom_features[mol_idx],
+            atom_cond_mask=atom_cond_mask,
+            cond_bond_features=host_batch.bond_features[mol_idx],
+            bond_cond_mask=bond_cond_mask,
+            prompt_smiles=smiles,
+        )
     mol.SetProp(batch_lib.SdfProperty.CONFORMER_ID, str(conformer_idx))
     mol.SetProp(batch_lib.SdfProperty.SEED, str(seed))
     return mol
@@ -506,18 +549,16 @@ def run_smiles_sampling(config: config_lib.SampleSmilesConfig) -> tuple[Chem.Mol
         else loaded.sampling_config
     )
 
-    jax_batch = batch_lib.collate_smiles(smiles).to_jax()
+    host_batch = batch_lib.collate_smiles(smiles)
+    jax_batch = host_batch.to_jax()
     denoiser = model_lib.Denoiser(config=loaded.model_config)
     generated_per_seed = tuple(
-        np.asarray(
-            sampling_lib.sample_coordinates(
-                jax.random.key(config.seed + conf_idx),
-                denoiser,
-                active_params,
-                batch=jax_batch,
-                config=sampling_config,
-            ),
-            dtype=np.float32,
+        sampling_lib.sample_molecules(
+            jax.random.key(config.seed + conf_idx),
+            denoiser,
+            active_params,
+            batch=jax_batch,
+            config=sampling_config,
         )
         for conf_idx in range(config.num_conformers)
     )
@@ -525,7 +566,11 @@ def run_smiles_sampling(config: config_lib.SampleSmilesConfig) -> tuple[Chem.Mol
     conformer_mols = tuple(
         _build_tagged_conformer(
             mol_smiles,
-            generated[mol_idx],
+            np.asarray(generated.positions[mol_idx]),
+            np.asarray(generated.atom_features[mol_idx]),
+            np.asarray(generated.bond_features[mol_idx]),
+            host_batch,
+            mol_idx=mol_idx,
             conformer_idx=conf_idx,
             seed=config.seed + conf_idx,
         )

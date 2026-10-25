@@ -21,7 +21,7 @@ class PairwiseDistances:
 
     pred_dists: jt.Float[jt.Array, "batch num_atoms num_atoms"]
     target_dists: jt.Float[jt.Array, "batch num_atoms num_atoms"]
-    pair_mask: jt.Float[jt.Array, "batch num_atoms num_atoms"]
+    pair_mask: jt.Bool[jt.Array, "batch num_atoms num_atoms"]
 
 
 @jt.typed
@@ -30,11 +30,11 @@ def _masked_centroid(
     atom_mask: jt.Bool[jax.Array, "*batch num_atoms"],
 ) -> jt.Float[jax.Array, "*batch 1 3"]:
     """Computes the masked mean coordinate across the atom axis."""
-    # (*batch, num_atoms, 1) float atom mask for coordinate broadcasting.
-    mask = atom_mask[..., None].astype(positions.dtype)
+    # (*batch, num_atoms, 1) atom mask for coordinate broadcasting.
+    mask = atom_mask[..., None]
     # (*batch, 1, 1) valid atom count per molecule, clamped to >= 1.
-    atom_count = jnp.maximum(mask.sum(axis=-2, keepdims=True), 1.0)
-    return (positions * mask).sum(axis=-2, keepdims=True) / atom_count
+    atom_count = jnp.maximum(jnp.sum(mask, axis=-2, keepdims=True), 1)
+    return jnp.sum(positions * mask, axis=-2, keepdims=True) / atom_count
 
 
 @jt.typed
@@ -82,7 +82,7 @@ def random_rotation(
     """
     *batch_shape, _, _ = positions.shape
     # (*batch, 2, 3) two random 3D vectors for Gram-Schmidt orthogonalization.
-    basis = jax.random.normal(key, shape=(*batch_shape, 2, _SPATIAL_DIMS), dtype=positions.dtype)
+    basis = jax.random.normal(key, shape=(*batch_shape, 2, _SPATIAL_DIMS))
     first_basis = basis[..., 0, :]
     second_basis = basis[..., 1, :]
 
@@ -124,8 +124,8 @@ def kabsch_align(
     Returns:
         Aligned target coordinates with padded atoms set to zero.
     """
-    # (*batch, num_atoms, 1) float atom mask for coordinate broadcasting.
-    mask = atom_mask[..., None].astype(target.dtype)
+    # (*batch, num_atoms, 1) atom mask for coordinate broadcasting.
+    mask = atom_mask[..., None]
     stopped_ref = jax.lax.stop_gradient(reference)
     stopped_target = jax.lax.stop_gradient(target)
 
@@ -188,7 +188,7 @@ def pairwise_distances_and_mask(
     valid_pairs = atom_mask[:, :, None] & atom_mask[:, None, :]
     not_self = ~(jnp.eye(num_atoms, dtype=jnp.bool_)[None, :, :])
     within_cutoff = target_dists < cutoff
-    pair_mask = (valid_pairs & not_self & within_cutoff).astype(predicted_positions.dtype)
+    pair_mask = valid_pairs & not_self & within_cutoff
     return PairwiseDistances(
         pred_dists=pred_dists,
         target_dists=target_dists,

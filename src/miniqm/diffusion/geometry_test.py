@@ -27,7 +27,6 @@ def _tetrahedral_signed_volume(
                     [3.0, 6.0, 9.0],
                     [99.0, -99.0, 42.0],
                 ],
-                dtype=jnp.float32,
             ),
             jnp.array([True, True, False]),
             jnp.array(
@@ -36,16 +35,12 @@ def _tetrahedral_signed_volume(
                     [1.0, 2.0, 3.0],
                     [0.0, 0.0, 0.0],
                 ],
-                dtype=jnp.float32,
             ),
         ),
         (
-            jnp.array(
-                [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
-                dtype=jnp.float32,
-            ),
+            jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
             jnp.array([False, False]),
-            jnp.zeros((2, 3), dtype=jnp.float32),
+            jnp.zeros((2, 3)),
         ),
     ),
     ids=("masked_padding", "all_masked_out"),
@@ -69,7 +64,6 @@ def test_random_rotation_preserves_distances_and_chirality():
             [0.0, 0.0, 2.5],
             [50.0, -30.0, 10.0],
         ],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array(
         [
@@ -96,7 +90,7 @@ def test_random_rotation_preserves_distances_and_chirality():
         _tetrahedral_signed_volume(centered_positions),
         atol=1e-5,
     )
-    np.testing.assert_array_equal(rotated_positions[:, 4, :], jnp.zeros((2, 3), dtype=jnp.float32))
+    np.testing.assert_array_equal(rotated_positions[:, 4, :], jnp.zeros((2, 3)))
     assert not jnp.allclose(rotated_positions[0], rotated_positions[1])
 
 
@@ -118,7 +112,6 @@ def test_kabsch_align_recovers_rotated_and_translated_coordinates():
                 [0.0, 0.0, 0.0],
             ],
         ],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array(
         [
@@ -127,7 +120,7 @@ def test_kabsch_align_recovers_rotated_and_translated_coordinates():
         ]
     )
     reference = geometry.zero_center_of_mass(raw_coords, atom_mask)
-    translation = jnp.array([[[3.5, -2.0, 7.0]], [[-4.0, 1.5, -3.0]]], dtype=jnp.float32)
+    translation = jnp.array([[[3.5, -2.0, 7.0]], [[-4.0, 1.5, -3.0]]])
     pad_garbage = jnp.array(
         [
             [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [9.0, 8.0, 7.0]],
@@ -139,7 +132,6 @@ def test_kabsch_align_recovers_rotated_and_translated_coordinates():
                 [-5.0, 4.0, 3.0],
             ],
         ],
-        dtype=jnp.float32,
     )
     rotated_positions = geometry.random_rotation(jax.random.key(42), reference, atom_mask)
     target = (rotated_positions + translation) * atom_mask[..., None] + pad_garbage
@@ -161,11 +153,10 @@ def test_kabsch_align_preserves_chirality_against_mirror_reflection():
             [0.0, 2.0, 0.0],
             [0.0, 0.0, 2.5],
         ],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array([True, True, True, True])
     reference = geometry.zero_center_of_mass(chiral_coords, atom_mask)
-    mirror_enantiomer = reference * jnp.array([1.0, 1.0, -1.0], dtype=jnp.float32)
+    mirror_enantiomer = reference * jnp.array([1.0, 1.0, -1.0])
 
     aligned_positions = geometry.kabsch_align(
         reference=reference,
@@ -190,13 +181,12 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
             [0.0, 0.0, 2.0],
             [0.0, 0.0, 0.0],
         ],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array([True, True, True, True, False])
     ground_truth = geometry.zero_center_of_mass(ground_truth, atom_mask)
     perturbed_positions = geometry.random_rotation(
         jax.random.key(11),
-        ground_truth + jnp.array([0.1, -0.05, 0.08], dtype=jnp.float32),
+        ground_truth + jnp.array([0.1, -0.05, 0.08]),
         atom_mask,
     )
 
@@ -227,5 +217,5 @@ def test_kabsch_align_gradients_flow_and_match_both_alignment_directions():
 
     assert jnp.all(jnp.isfinite(grad_pred_to_gt))
     assert float(jnp.linalg.norm(grad_pred_to_gt[:4])) > 0.0
-    np.testing.assert_array_equal(grad_pred_to_gt[4], jnp.zeros((3,), dtype=jnp.float32))
+    np.testing.assert_array_equal(grad_pred_to_gt[4], jnp.zeros((3,)))
     np.testing.assert_allclose(grad_pred_to_gt, grad_gt_to_pred, atol=1e-5)

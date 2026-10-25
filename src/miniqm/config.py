@@ -17,7 +17,7 @@ DEFAULT_SMILES: Final = ("CCO", "c1ccccc1")
 
 
 class CheckpointName(enum.StrEnum):
-    """Standard MessagePack checkpoint filenames inside `<run_dir>/checkpoints/`."""
+    """Standard MessagePack checkpoint filenames inside the checkpoints subdirectory."""
 
     LATEST = "latest.msgpack"
     BEST = "best.msgpack"
@@ -33,15 +33,17 @@ class ArtifactName(enum.StrEnum):
 
 
 class NoiseConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
-    """Karras EDM noise distribution and rollout schedule parameters.
+    """Karras EDM noise distribution, rollout schedule, and conditioning mask probabilities.
 
     Attributes:
         sigma_data: Empirical coordinate standard deviation on centered QM9 (Angstroms).
         s_min: Minimum relative noise multiplier at the end of the sampling rollout.
         s_max: Maximum relative noise multiplier at the start of the sampling rollout.
-        rho: Polynomial exponent controlling step spacing between `s_max` and `s_min`.
-        log_sigma_mean: Mean of the log-normal training noise distribution `ln(sigma / sigma_data)`.
+        rho: Polynomial exponent controlling step spacing between s_max and s_min.
+        log_sigma_mean: Mean of the log-normal training noise distribution.
         log_sigma_std: Standard deviation of the log-normal training noise distribution.
+        uncond_prob: Probability of masking all 2D atom/bond conditioning during training.
+        partial_cond_prob: Probability of masking a random subgraph during training.
     """
 
     sigma_data: pydantic.PositiveFloat = 1.2
@@ -50,11 +52,18 @@ class NoiseConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     rho: pydantic.PositiveInt = 7
     log_sigma_mean: float = -1.2
     log_sigma_std: pydantic.PositiveFloat = 1.5
+    uncond_prob: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] = 0.25
+    partial_cond_prob: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] = 0.25
 
     @pydantic.model_validator(mode="after")
     def _validate_bounds(self) -> Self:
         if self.s_max <= self.s_min:
             raise ValueError(f"Expected s_max ({self.s_max}) > s_min ({self.s_min}).")
+        if self.uncond_prob + self.partial_cond_prob > 1.0:
+            raise ValueError(
+                f"Expected uncond_prob + partial_cond_prob <= 1.0, got "
+                f"{self.uncond_prob + self.partial_cond_prob}."
+            )
         return self
 
 
@@ -64,7 +73,7 @@ class TransformerConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     Attributes:
         hidden_dim: Atom token embedding and attention hidden dimension.
         num_layers: Number of pre-norm Transformer blocks.
-        num_heads: Number of attention heads per block (must divide `hidden_dim`).
+        num_heads: Number of attention heads per block (must divide hidden_dim).
         mlp_factor: Expansion multiplier for the SiLU feed-forward hidden dimension.
     """
 
@@ -87,7 +96,7 @@ class FourierNoiseConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Sinusoidal Fourier embedding parameters for log-noise conditioning.
 
     Attributes:
-        log_sigma_scale: Scaling factor applied to `log(sigma / sigma_data)` before encoding.
+        log_sigma_scale: Scaling factor applied to the normalized log-noise level before encoding.
         max_period: Maximum sinusoidal period controlling the lowest frequency band.
     """
 
@@ -110,15 +119,19 @@ class DenoiserConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
 
 
 class LossConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
-    """Loss weighting and cutoff parameters for 3D coordinate diffusion training.
+    """Loss weighting and cutoff parameters for joint 2D+3D molecular diffusion training.
 
     Attributes:
         distance_loss_weight: Multiplier on the auxiliary pairwise distance MSE term.
         distance_cutoff: Upper pairwise distance threshold (Angstroms) for auxiliary supervision.
+        atom_loss_weight: Multiplier on the EDM-weighted one-hot atom feature MSE term.
+        bond_loss_weight: Multiplier on the EDM-weighted one-hot bond feature MSE term.
     """
 
     distance_loss_weight: pydantic.NonNegativeFloat = 0.25
     distance_cutoff: pydantic.PositiveFloat = 5.0
+    atom_loss_weight: pydantic.NonNegativeFloat = 0.25
+    bond_loss_weight: pydantic.NonNegativeFloat = 0.25
 
 
 class SamplingConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
@@ -126,7 +139,7 @@ class SamplingConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
 
     Attributes:
         num_steps: Number of reverse discretization steps across the Karras schedule.
-        gamma_0: Fractional noise expansion rate when `sigma > gamma_min`.
+        gamma_0: Fractional noise expansion rate when sigma exceeds gamma_min.
         gamma_min: Noise threshold (Angstroms) below which stochastic noise injection is disabled.
         noise_scale: Standard deviation multiplier for injected Gaussian noise.
         step_scale: Euler velocity multiplier applied during stochastic noise injection steps.
@@ -146,7 +159,7 @@ class TrainConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
         model: Denoiser Transformer and Karras preconditioning configuration.
         loss: Kabsch-aligned MSE and local pairwise distance loss weights.
         learning_rate: Peak AdamW learning rate after linear warmup.
-        warmup_steps: Number of linear warmup steps from `0.0` to `learning_rate`.
+        warmup_steps: Number of linear warmup steps from zero to the peak learning rate.
         decay_steps: Total steps over which the warmup + cosine decay schedule spans.
         min_learning_rate: Floor learning rate at the end of cosine decay.
         weight_decay: Decoupled AdamW weight decay coefficient.
@@ -190,7 +203,7 @@ class RunConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
         batch_size: Number of molecules per optimization step.
         num_steps: Total number of optimization steps to run.
         log_every: Step interval for writing training scalars and console logs.
-        eval_every: Step interval for computing validation loss and saving `latest.msgpack`.
+        eval_every: Step interval for computing validation loss and saving the latest checkpoint.
         sample_every: Step interval for running reverse-ODE sampling on a validation batch.
         max_train_molecules: Optional cap on loaded training molecules (for debugging/tests).
         max_val_molecules: Optional cap on loaded validation molecules.
@@ -220,13 +233,13 @@ class EvalConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Configuration for evaluating a trained checkpoint on a Parquet split.
 
     Attributes:
-        run_dir: Run directory (or parent experiment directory) containing `config.json`.
+        run_dir: Run directory or parent experiment directory containing run artifacts.
         test_path: Path to the evaluation Parquet split.
-        checkpoint_name: Filename inside `<run_dir>/checkpoints/` to evaluate.
-        use_ema: Whether to evaluate `ema_params` (`True`) or raw `params` (`False`).
+        checkpoint_name: Checkpoint filename inside the checkpoints subdirectory to evaluate.
+        use_ema: Whether to evaluate EMA weights or raw optimizer parameters.
         batch_size: Number of molecules per evaluation batch.
-        max_test_molecules: Optional cap on loaded molecules from `test_path`.
-        num_sampling_steps: Optional override for `SamplingConfig.num_steps`.
+        max_test_molecules: Optional cap on loaded molecules from the test split.
+        num_sampling_steps: Optional override for the number of reverse sampling steps.
         output_path: Optional path to write the JSON evaluation report.
         seed: PRNG seed for teacher-forced noise and reverse-ODE sampling.
     """
@@ -246,13 +259,13 @@ class SampleSmilesConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     """Configuration for generating 3D conformers from a sequence of SMILES strings.
 
     Attributes:
-        run_dir: Run directory (or parent experiment directory) containing `config.json`.
+        run_dir: Run directory or parent experiment directory containing run artifacts.
         smiles: SMILES strings to generate 3D conformers for.
-        smiles_file: Optional newline-delimited SMILES file (takes precedence over `smiles`).
-        checkpoint_name: Filename inside `<run_dir>/checkpoints/` to load.
-        use_ema: Whether to sample with `ema_params` (`True`) or raw `params` (`False`).
-        num_conformers: Number of conformers to sample per SMILES (using `seed + conformer_idx`).
-        num_sampling_steps: Optional override for `SamplingConfig.num_steps`.
+        smiles_file: Optional newline-delimited SMILES file taking precedence over inline SMILES.
+        checkpoint_name: Checkpoint filename inside the checkpoints subdirectory to load.
+        use_ema: Whether to sample with EMA weights or raw optimizer parameters.
+        num_conformers: Number of conformers to sample per SMILES string.
+        num_sampling_steps: Optional override for the number of reverse sampling steps.
         output_sdf: Output SDF file path where generated 3D conformers are written.
         seed: Base PRNG seed for reverse-ODE coordinate sampling.
     """

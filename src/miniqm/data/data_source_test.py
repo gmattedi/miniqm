@@ -26,7 +26,7 @@ def _make_sample_row(*, index: int) -> dict[str, object]:
     }
 
 
-def _write_sample_parquet(tmp_path: pathlib.Path, num_rows: int = 3) -> pathlib.Path:
+def _write_sample_parquet(tmp_path: pathlib.Path, *, num_rows: int = 3) -> pathlib.Path:
     parquet_path = tmp_path / "split.parquet"
     rows = tuple(_make_sample_row(index=row_idx + 1) for row_idx in range(num_rows))
     pq.write_table(pa.Table.from_pylist(rows), parquet_path)

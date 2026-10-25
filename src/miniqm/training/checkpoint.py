@@ -135,28 +135,28 @@ def load_run_checkpoint(
         (resolved_dir / config_lib.ArtifactName.CONFIG).read_text(encoding="utf-8")
     )
     model_config = config_lib.DenoiserConfig.model_validate(saved_config["train"]["model"])
-    loss_payload = {k: v for k, v in saved_config["train"]["loss"].items() if k != "noise"}
-    loss_config = config_lib.LossConfig.model_validate(loss_payload)
-    sampling_payload = {k: v for k, v in saved_config["sampling"].items() if k != "noise"}
-    sampling_config = config_lib.SamplingConfig.model_validate(sampling_payload)
+    loss_config = config_lib.LossConfig.model_validate(saved_config["train"]["loss"])
+    sampling_config = config_lib.SamplingConfig.model_validate(saved_config["sampling"])
 
-    dummy_positions = jnp.zeros((1, batch_lib.MAX_ATOMS, _SPATIAL_DIMS), dtype=jnp.float32)
+    dummy_positions = jnp.zeros((1, batch_lib.MAX_ATOMS, _SPATIAL_DIMS))
+    dummy_atoms = jnp.zeros((1, batch_lib.MAX_ATOMS, batch_lib.NUM_ATOM_FEATURES))
+    dummy_bonds = jnp.zeros(
+        (1, batch_lib.MAX_ATOMS, batch_lib.MAX_ATOMS, batch_lib.NUM_BOND_FEATURES),
+    )
     dummy_batch = batch_lib.JaxBatch(
-        atom_features=jnp.zeros(
-            (1, batch_lib.MAX_ATOMS, batch_lib.NUM_ATOM_FEATURES),
-            dtype=jnp.float32,
-        ),
-        bond_features=jnp.zeros(
-            (1, batch_lib.MAX_ATOMS, batch_lib.MAX_ATOMS, batch_lib.NUM_BOND_FEATURES),
-            dtype=jnp.float32,
-        ),
+        atom_features=dummy_atoms,
+        bond_features=dummy_bonds,
         atom_mask=jnp.ones((1, batch_lib.MAX_ATOMS), dtype=jnp.bool_),
         positions=dummy_positions,
+        atom_cond_mask=jnp.ones_like(dummy_atoms, dtype=jnp.bool_),
+        bond_cond_mask=jnp.ones_like(dummy_bonds, dtype=jnp.bool_),
     )
-    dummy_sigma = jnp.ones((1,), dtype=jnp.float32)
+    dummy_sigma = jnp.ones((1,))
     template_params = model_lib.Denoiser(config=model_config).init(
         jax.random.key(0),
         dummy_positions,
+        dummy_atoms,
+        dummy_bonds,
         dummy_sigma,
         batch=dummy_batch,
     )

@@ -29,11 +29,10 @@ def _make_tetrahedral_batch() -> _TetrahedralBatch:
                 [0.0, 0.0, 0.0],
             ]
         ],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array([[True, True, True, True, False]], dtype=jnp.bool_)
     positions = geometry.zero_center_of_mass(raw_positions, atom_mask)
-    sigma = jnp.array([1.2], dtype=jnp.float32)
+    sigma = jnp.array([1.2])
     return _TetrahedralBatch(positions=positions, atom_mask=atom_mask, sigma=sigma)
 
 
@@ -56,7 +55,7 @@ def test_compute_diffusion_loss_is_zero_under_proper_rotation():
 
 def test_aligned_mse_penalizes_mirror_enantiomer_while_distance_loss_is_zero():
     batch = _make_tetrahedral_batch()
-    reflected_pred = batch.positions * jnp.array([1.0, 1.0, -1.0], dtype=jnp.float32)
+    reflected_pred = batch.positions * jnp.array([1.0, 1.0, -1.0])
 
     output = losses.compute_diffusion_loss(
         predicted_positions=reflected_pred,
@@ -84,11 +83,9 @@ def test_pairwise_distance_loss_respects_cutoff_and_padding(
 ):
     target_positions = jnp.array(
         [[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
-        dtype=jnp.float32,
     )
     predicted_positions = jnp.array(
         [[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [10.0, 0.0, 0.0], [99.0, 0.0, 0.0]]],
-        dtype=jnp.float32,
     )
     atom_mask = jnp.array([[True, True, True, False]], dtype=jnp.bool_)
 
@@ -124,3 +121,30 @@ def test_compute_diffusion_loss_has_finite_gradients_and_zero_padded_grad():
     assert bool(jnp.all(jnp.isfinite(grad_at_exact)))
     assert float(jnp.linalg.norm(grad_at_noisy[:, :4])) > 0.0
     np.testing.assert_allclose(grad_at_noisy[:, 4:], 0.0, atol=1e-7)
+
+
+def test_compute_diffusion_loss_includes_atom_and_bond_feature_mse():
+    batch = _make_tetrahedral_batch()
+    target_atoms = jnp.ones((1, 5, 26)) * batch.atom_mask[..., None]
+    pred_atoms = jnp.zeros((1, 5, 26))
+    target_bonds = jnp.ones((1, 5, 5, 6))
+    pred_bonds = jnp.zeros((1, 5, 5, 6))
+
+    output = losses.compute_diffusion_loss(
+        predicted_positions=batch.positions,
+        target_positions=batch.positions,
+        predicted_atom_features=pred_atoms,
+        target_atom_features=target_atoms,
+        predicted_bond_features=pred_bonds,
+        target_bond_features=target_bonds,
+        sigma=batch.sigma,
+        atom_mask=batch.atom_mask,
+    )
+
+    assert float(output.atom_loss) > 0.0
+    assert float(output.bond_loss) > 0.0
+    np.testing.assert_allclose(
+        float(output.total_loss),
+        0.25 * float(output.atom_loss + output.bond_loss),
+        rtol=1e-5,
+    )

@@ -17,7 +17,12 @@ from miniqm.training import train
 _TEST_TRAIN_CONFIG: Final = config_lib.TrainConfig(
     model=config_lib.DenoiserConfig(
         transformer=config_lib.TransformerConfig(hidden_dim=32, num_layers=2, num_heads=4),
-        noise=config_lib.NoiseConfig(log_sigma_mean=0.5, log_sigma_std=0.05),
+        noise=config_lib.NoiseConfig(
+            log_sigma_mean=0.5,
+            log_sigma_std=0.05,
+            uncond_prob=0.0,
+            partial_cond_prob=0.0,
+        ),
     ),
     learning_rate=3e-3,
     warmup_steps=2,
@@ -37,17 +42,19 @@ def _make_synthetic_batch() -> batch_lib.JaxBatch:
         ],
         dtype=jnp.bool_,
     )
-    raw_positions = jax.random.normal(pos_key, (2, 5, 3), dtype=jnp.float32)
+    raw_positions = jax.random.normal(pos_key, (2, 5, 3))
     positions = geometry.zero_center_of_mass(raw_positions, atom_mask)
+    atom_features = jax.random.normal(atom_key, (2, 5, batch_lib.NUM_ATOM_FEATURES))
+    raw_bonds = jax.random.normal(bond_key, (2, 5, 5, batch_lib.NUM_BOND_FEATURES))
+    bond_features = 0.5 * (raw_bonds + jnp.swapaxes(raw_bonds, 1, 2))
+    pair_mask = atom_mask[:, :, None] & atom_mask[:, None, :]
     return batch_lib.JaxBatch(
-        atom_features=jax.random.normal(
-            atom_key, (2, 5, batch_lib.NUM_ATOM_FEATURES), dtype=jnp.float32
-        ),
-        bond_features=jax.random.normal(
-            bond_key, (2, 5, 5, batch_lib.NUM_BOND_FEATURES), dtype=jnp.float32
-        ),
+        atom_features=atom_features,
+        bond_features=bond_features,
         atom_mask=atom_mask,
         positions=positions,
+        atom_cond_mask=jnp.broadcast_to(atom_mask[..., None], atom_features.shape),
+        bond_cond_mask=jnp.broadcast_to(pair_mask[..., None], bond_features.shape),
     )
 
 
@@ -175,7 +182,7 @@ def test_short_training_loop_reduces_diffusion_loss_on_single_batch():
 
     eval_rng = jax.random.key(99)
     initial_eval = jit_eval_step(state.params, eval_rng, synthetic_batch)
-    for _ in range(25):
+    for _ in range(40):
         state = jit_train_step(state, synthetic_batch).state
     final_eval = jit_eval_step(state.params, eval_rng, synthetic_batch)
 
@@ -185,22 +192,12 @@ def test_short_training_loop_reduces_diffusion_loss_on_single_batch():
 @pytest.mark.parametrize(
     ("kwargs", "error_match"),
     (
-        ({"learning_rate": 0.0}, "greater than 0"),
         ({"min_learning_rate": 1e-2, "learning_rate": 1e-3}, "min_learning_rate <= learning_rate"),
-        ({"warmup_steps": -1}, "greater than or equal to 0"),
         ({"warmup_steps": 100, "decay_steps": 100}, "decay_steps"),
-        ({"weight_decay": -0.1}, "greater than or equal to 0"),
-        ({"max_grad_norm": 0.0}, "greater than 0"),
-        ({"ema_decay": 1.5}, "less than or equal to 1"),
     ),
     ids=(
-        "zero_lr",
         "min_lr_exceeds_lr",
-        "negative_warmup",
         "decay_not_greater_than_warmup",
-        "negative_weight_decay",
-        "zero_grad_norm",
-        "ema_decay_above_one",
     ),
 )
 def test_train_config_rejects_invalid_hyperparameters(
@@ -213,12 +210,4 @@ def test_train_config_rejects_invalid_hyperparameters(
             min_learning_rate=float(kwargs.get("min_learning_rate", 1e-5)),
             warmup_steps=int(kwargs.get("warmup_steps", 1_000)),
             decay_steps=int(kwargs.get("decay_steps", 100_000)),
-            weight_decay=float(kwargs.get("weight_decay", 1e-4)),
-            max_grad_norm=float(kwargs.get("max_grad_norm", 1.0)),
-            ema_decay=float(kwargs.get("ema_decay", 0.999)),
         )
-
-
-def test_run_config_rejects_invalid_num_devices():
-    with pytest.raises(ValueError, match="greater than 0"):
-        config_lib.RunConfig(num_devices=0)

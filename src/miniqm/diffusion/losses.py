@@ -1,4 +1,4 @@
-"""Differentiable Kabsch-aligned EDM coordinate MSE and local pairwise distance losses."""
+"""Differentiable Kabsch-aligned EDM 3D coordinate and 2D atom/bond feature losses."""
 
 import dataclasses
 from typing import Final
@@ -34,6 +34,8 @@ class LossOutput:
     total_loss: jt.Float[jt.Array, ""]
     aligned_mse_loss: jt.Float[jt.Array, ""]
     distance_loss: jt.Float[jt.Array, ""]
+    atom_loss: jt.Float[jt.Array, ""]
+    bond_loss: jt.Float[jt.Array, ""]
     rmsd: jt.Float[jt.Array, ""]
 
 
@@ -63,11 +65,12 @@ def aligned_mse_loss(
         target=target_positions,
         atom_mask=atom_mask,
     )
-    mask_f32 = atom_mask.astype(predicted_positions.dtype)
-    atom_counts = jnp.maximum(jnp.sum(mask_f32, axis=-1), 1.0)
+    atom_counts = jnp.maximum(jnp.sum(atom_mask, axis=-1), 1)
 
     # (batch, num_atoms) squared Euclidean error per atom, zeroed on padded slots.
-    sq_dist_per_atom = jnp.sum(jnp.square(predicted_positions - aligned_target), axis=-1) * mask_f32
+    sq_dist_per_atom = (
+        jnp.sum(jnp.square(predicted_positions - aligned_target), axis=-1) * atom_mask
+    )
     # (batch,) mean squared coordinate error and RMSD per molecule.
     mse_per_mol = jnp.sum(sq_dist_per_atom, axis=-1) / atom_counts
     rmsd_per_mol = jnp.sqrt(mse_per_mol + _DIST_EPS)
@@ -107,9 +110,52 @@ def pairwise_distance_loss(
     )
     sq_err = jnp.square(pairwise.pred_dists - pairwise.target_dists) * pairwise.pair_mask
     # (batch,) mean squared distance error per molecule across active local pairs.
-    num_pairs = jnp.maximum(jnp.sum(pairwise.pair_mask, axis=(-1, -2)), 1.0)
+    num_pairs = jnp.maximum(jnp.sum(pairwise.pair_mask, axis=(-1, -2)), 1)
     mse_per_mol = jnp.sum(sq_err, axis=(-1, -2)) / num_pairs
     return jnp.mean(mse_per_mol)
+
+
+@jt.typed
+def atom_feature_loss(
+    *,
+    predicted_atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"],
+    target_atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"],
+    sigma: jt.Float[jt.Array, " batch"],
+    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
+) -> jt.Float[jt.Array, ""]:
+    """Computes EDM-weighted MSE on continuous one-hot atom features over valid atoms."""
+    atom_counts = jnp.maximum(jnp.sum(atom_mask, axis=-1), 1)
+    # (batch, num_atoms) mean squared feature error per valid atom.
+    per_atom_mse = (
+        jnp.mean(jnp.square(predicted_atom_features - target_atom_features), axis=-1) * atom_mask
+    )
+    # (batch,) mean squared atom feature error per molecule.
+    mse_per_mol = jnp.sum(per_atom_mse, axis=-1) / atom_counts
+    factors = noise_lib.preconditioning_factors(sigma, config=config)
+    return jnp.mean(factors.loss_weight * mse_per_mol)
+
+
+@jt.typed
+def bond_feature_loss(
+    *,
+    predicted_bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
+    target_bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"],
+    sigma: jt.Float[jt.Array, " batch"],
+    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
+) -> jt.Float[jt.Array, ""]:
+    """Computes EDM-weighted MSE on continuous one-hot bond features over valid atom pairs."""
+    pair_mask = noise_lib.off_diagonal_pair_mask(atom_mask)[..., 0]
+    pair_counts = jnp.maximum(jnp.sum(pair_mask, axis=(-1, -2)), 1)
+    # (batch, num_atoms, num_atoms) mean squared feature error per distinct valid atom pair.
+    per_pair_mse = (
+        jnp.mean(jnp.square(predicted_bond_features - target_bond_features), axis=-1) * pair_mask
+    )
+    # (batch,) mean squared bond feature error per molecule.
+    mse_per_mol = jnp.sum(per_pair_mse, axis=(-1, -2)) / pair_counts
+    factors = noise_lib.preconditioning_factors(sigma, config=config)
+    return jnp.mean(factors.loss_weight * mse_per_mol)
 
 
 @jt.typed
@@ -119,21 +165,31 @@ def compute_diffusion_loss(
     target_positions: jt.Float[jt.Array, "batch num_atoms 3"],
     sigma: jt.Float[jt.Array, " batch"],
     atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    predicted_atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"] | None = None,
+    target_atom_features: jt.Float[jt.Array, "batch num_atoms num_atom_features"] | None = None,
+    predicted_bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"]
+    | None = None,
+    target_bond_features: jt.Float[jt.Array, "batch num_atoms num_atoms num_bond_features"]
+    | None = None,
     config: config_lib.LossConfig = config_lib.DEFAULT_LOSS_CONFIG,
     noise_config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> LossOutput:
-    """Computes the combined differentiable Kabsch-aligned EDM MSE and pairwise distance loss.
+    """Computes the combined 3D coordinate and 2D atom/bond diffusion training loss.
 
     Args:
         predicted_positions: Denoised atomic coordinates predicted by the model.
         target_positions: Ground-truth atomic coordinates.
         sigma: Noise standard deviation per molecule.
         atom_mask: Valid-atom mask.
+        predicted_atom_features: Optional denoised one-hot atom features.
+        target_atom_features: Optional ground-truth one-hot atom features.
+        predicted_bond_features: Optional denoised one-hot bond features.
+        target_bond_features: Optional ground-truth one-hot bond features.
         config: Loss weighting and cutoff configuration.
         noise_config: Karras EDM noise preconditioning configuration.
 
     Returns:
-        Combined scalar loss alongside individual MSE, distance, and RMSD terms.
+        Combined scalar loss alongside individual 3D and 2D loss terms.
     """
     mse_stats = aligned_mse_loss(
         predicted_positions=predicted_positions,
@@ -148,10 +204,39 @@ def compute_diffusion_loss(
         atom_mask=atom_mask,
         cutoff=config.distance_cutoff,
     )
-    total_loss = mse_stats.weighted_mse + config.distance_loss_weight * dist_loss
+    atom_loss = (
+        atom_feature_loss(
+            predicted_atom_features=predicted_atom_features,
+            target_atom_features=target_atom_features,
+            sigma=sigma,
+            atom_mask=atom_mask,
+            config=noise_config,
+        )
+        if predicted_atom_features is not None and target_atom_features is not None
+        else jnp.zeros(())
+    )
+    bond_loss = (
+        bond_feature_loss(
+            predicted_bond_features=predicted_bond_features,
+            target_bond_features=target_bond_features,
+            sigma=sigma,
+            atom_mask=atom_mask,
+            config=noise_config,
+        )
+        if predicted_bond_features is not None and target_bond_features is not None
+        else jnp.zeros(())
+    )
+    total_loss = (
+        mse_stats.weighted_mse
+        + config.distance_loss_weight * dist_loss
+        + config.atom_loss_weight * atom_loss
+        + config.bond_loss_weight * bond_loss
+    )
     return LossOutput(
         total_loss=total_loss,
         aligned_mse_loss=mse_stats.weighted_mse,
         distance_loss=dist_loss,
+        atom_loss=atom_loss,
+        bond_loss=bond_loss,
         rmsd=mse_stats.rmsd,
     )

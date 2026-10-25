@@ -19,11 +19,15 @@ _TINY_TRAIN_CONFIG: Final = config_lib.TrainConfig(
 
 
 def _make_dummy_batch() -> batch_lib.JaxBatch:
+    atom_features = jnp.ones((2, 4, batch_lib.NUM_ATOM_FEATURES))
+    bond_features = jnp.ones((2, 4, 4, batch_lib.NUM_BOND_FEATURES))
     return batch_lib.JaxBatch(
-        atom_features=jnp.ones((2, 4, 22), dtype=jnp.float32),
-        bond_features=jnp.ones((2, 4, 4, 6), dtype=jnp.float32),
+        atom_features=atom_features,
+        bond_features=bond_features,
         atom_mask=jnp.array([[True, True, False, False], [True, True, True, False]]),
-        positions=jnp.zeros((2, 4, 3), dtype=jnp.float32),
+        positions=jnp.zeros((2, 4, 3)),
+        atom_cond_mask=jnp.ones_like(atom_features, dtype=jnp.bool_),
+        bond_cond_mask=jnp.ones_like(bond_features, dtype=jnp.bool_),
     )
 
 

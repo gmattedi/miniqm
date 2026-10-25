@@ -139,13 +139,17 @@ def init_train_state(
     """
     init_rng, state_rng = jax.random.split(rng)
     batch_size, num_atoms = dummy_batch.atom_mask.shape
-    dummy_positions = jnp.zeros((batch_size, num_atoms, _SPATIAL_DIMS), dtype=jnp.float32)
-    dummy_sigma = jnp.ones((batch_size,), dtype=jnp.float32)
+    dummy_positions = jnp.zeros((batch_size, num_atoms, _SPATIAL_DIMS))
+    dummy_atoms = jnp.zeros_like(dummy_batch.atom_features)
+    dummy_bonds = jnp.zeros_like(dummy_batch.bond_features)
+    dummy_sigma = jnp.ones((batch_size,))
 
     denoiser = model_lib.Denoiser(config=config.model)
     params = denoiser.init(
         init_rng,
         dummy_positions,
+        dummy_atoms,
+        dummy_bonds,
         dummy_sigma,
         batch=dummy_batch,
     )
@@ -180,9 +184,9 @@ def train_step(
     step_rng, next_rng = jax.random.split(state.rng)
     noisy_sample = noise_lib.make_noisy_sample(
         step_rng,
-        batch.positions,
-        batch.atom_mask,
+        batch,
         config=config.model.noise,
+        sample_cond_masks=True,
     )
 
     @jt.typed
@@ -199,7 +203,7 @@ def train_step(
         return loss_out.total_loss, loss_out
 
     (_, loss_output), grads = jax.value_and_grad(_loss_fn, has_aux=True)(state.params)
-    grad_norm = jnp.asarray(optax.tree.norm(grads), dtype=jnp.float32)
+    grad_norm = jnp.asarray(optax.tree.norm(grads))
 
     optimizer = build_optimizer(config)
     updates, next_opt_state = optimizer.update(grads, state.opt_state, state.params)
@@ -212,7 +216,7 @@ def train_step(
             step_size=1.0 - config.ema_decay,
         ),
     )
-    lr = jnp.asarray(learning_rate_schedule(config)(state.step), dtype=jnp.float32)
+    lr = jnp.asarray(learning_rate_schedule(config)(state.step))
 
     next_state = TrainState(
         step=state.step + 1,
@@ -268,13 +272,17 @@ def tabulate_model(
         Formatted table summarizing module inputs, outputs, and parameter counts.
     """
     batch_size, num_atoms = dummy_batch.atom_mask.shape
-    dummy_positions = jnp.zeros((batch_size, num_atoms, _SPATIAL_DIMS), dtype=jnp.float32)
-    dummy_sigma = jnp.ones((batch_size,), dtype=jnp.float32)
+    dummy_positions = jnp.zeros((batch_size, num_atoms, _SPATIAL_DIMS))
+    dummy_atoms = jnp.zeros_like(dummy_batch.atom_features)
+    dummy_bonds = jnp.zeros_like(dummy_batch.bond_features)
+    dummy_sigma = jnp.ones((batch_size,))
     denoiser = model_lib.Denoiser(config=config)
     with jt.disable_typechecking():
         return denoiser.tabulate(
             jax.random.key(0),
             dummy_positions,
+            dummy_atoms,
+            dummy_bonds,
             dummy_sigma,
             batch=dummy_batch,
             depth=depth,
@@ -476,6 +484,8 @@ def _log_train_step(
             "total_loss": total_loss,
             "aligned_mse_loss": float(loss_out.aligned_mse_loss),
             "distance_loss": float(loss_out.distance_loss),
+            "atom_loss": float(loss_out.atom_loss),
+            "bond_loss": float(loss_out.bond_loss),
             "rmsd": rmsd,
             "grad_norm": grad_norm,
             "learning_rate": learning_rate,
