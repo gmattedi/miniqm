@@ -52,7 +52,6 @@ def test_compute_diffusion_loss_is_zero_under_proper_rotation():
     np.testing.assert_allclose(float(output.distance_loss), 0.0, atol=1e-6)
     np.testing.assert_allclose(float(output.total_loss), 0.0, atol=1e-6)
     np.testing.assert_allclose(float(output.rmsd), 0.0, atol=2e-4)
-    np.testing.assert_allclose(float(output.lddt), 1.0, atol=1e-6)
 
 
 def test_aligned_mse_penalizes_mirror_enantiomer_while_distance_loss_is_zero():
@@ -125,36 +124,3 @@ def test_compute_diffusion_loss_has_finite_gradients_and_zero_padded_grad():
     assert bool(jnp.all(jnp.isfinite(grad_at_exact)))
     assert float(jnp.linalg.norm(grad_at_noisy[:, :4])) > 0.0
     np.testing.assert_allclose(grad_at_noisy[:, 4:], 0.0, atol=1e-7)
-
-
-@pytest.mark.parametrize(
-    ("stretched_x", "expected_lddt"),
-    (
-        (1.05, 1.0),
-        (1.20, 0.75),
-        (1.40, 0.50),
-        (1.80, 0.25),
-        (2.50, 0.0),
-    ),
-    ids=("all_pass", "three_pass", "two_pass", "one_pass", "none_pass"),
-)
-def test_lddt_per_molecule_scores_distance_errors_across_thresholds(
-    stretched_x: float,
-    expected_lddt: float,
-):
-    target_positions = jnp.array(
-        [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
-        dtype=jnp.float32,
-    )
-    predicted_positions = jnp.array(
-        [[[0.0, 0.0, 0.0], [stretched_x, 0.0, 0.0], [99.0, 0.0, 0.0]]],
-        dtype=jnp.float32,
-    )
-    atom_mask = jnp.array([[True, True, False]], dtype=jnp.bool_)
-
-    scores = losses.lddt_per_molecule(
-        predicted_positions=predicted_positions,
-        target_positions=target_positions,
-        atom_mask=atom_mask,
-    )
-    np.testing.assert_allclose(float(scores[0]), expected_lddt, atol=1e-6)

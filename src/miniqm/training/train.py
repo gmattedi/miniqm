@@ -465,7 +465,6 @@ def _log_train_step(
     loss_out = step_out.loss_output
     total_loss = float(loss_out.total_loss)
     rmsd = float(loss_out.rmsd)
-    lddt = float(loss_out.lddt)
     grad_norm = float(step_out.grad_norm)
     learning_rate = float(step_out.learning_rate)
     _write_scalars(
@@ -478,7 +477,6 @@ def _log_train_step(
             "aligned_mse_loss": float(loss_out.aligned_mse_loss),
             "distance_loss": float(loss_out.distance_loss),
             "rmsd": rmsd,
-            "lddt": lddt,
             "grad_norm": grad_norm,
             "learning_rate": learning_rate,
             "wall_time_s": elapsed_s,
@@ -486,15 +484,14 @@ def _log_train_step(
     )
     progress_bar.update(
         task_id,
-        metrics=(f"loss={total_loss:.4f} rmsd={rmsd:.3f}A lddt={lddt:.3f} lr={learning_rate:.2e}"),
+        metrics=(f"loss={total_loss:.4f} rmsd={rmsd:.3f}A lr={learning_rate:.2e}"),
     )
     _LOGGER.info(
-        "step=%d/%d train_loss=%.4f rmsd=%.3f A lddt=%.3f grad_norm=%.2f lr=%.2e",
+        "step=%d/%d train_loss=%.4f rmsd=%.3f A grad_norm=%.2f lr=%.2e",
         step_idx,
         num_steps,
         total_loss,
         rmsd,
-        lddt,
         grad_norm,
         learning_rate,
     )
@@ -610,12 +607,11 @@ def run_training(config: config_lib.RunConfig) -> TrainState:
                         shardings.primary_device,
                     )
                     _LOGGER.info(
-                        "step=%d/%d val_loss=%.4f val_rmsd=%.3f A val_lddt=%.3f",
+                        "step=%d/%d val_loss=%.4f val_rmsd=%.3f A",
                         step_idx,
                         config.num_steps,
                         val_metrics.total_loss,
                         val_metrics.rmsd,
-                        val_metrics.lddt,
                     )
 
                 if step_idx % config.sample_every == 0 or step_idx == config.num_steps:
@@ -642,12 +638,14 @@ def run_training(config: config_lib.RunConfig) -> TrainState:
                             shardings.primary_device,
                         )
                     _LOGGER.info(
-                        "step=%d/%d sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f (best=%.3f)",
+                        "step=%d/%d sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f (best=%.3f) "
+                        "stereo_violations=%.1f%%",
                         step_idx,
                         config.num_steps,
                         sampling_metrics.sampled_rmsd_mean,
                         sampling_metrics.sampled_lddt_mean,
                         best_sampled_lddt,
+                        100.0 * sampling_metrics.stereocenter_violation_rate,
                     )
 
                 if step_idx < config.num_steps:

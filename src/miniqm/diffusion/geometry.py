@@ -1,5 +1,6 @@
-"""3D coordinate centering, rotation augmentation, and Kabsch alignment in JAX."""
+"""3D coordinate centering, rotation augmentation, Kabsch alignment, and pairwise distances."""
 
+import dataclasses
 from typing import Final
 
 import jax
@@ -8,7 +9,19 @@ import jax.numpy as jnp
 from miniqm import jaxtypes as jt
 
 _MIN_NORM: Final = 1e-10  # Floor on Gram-Schmidt vector norms to prevent division by zero.
+# Prevents infinite gradient of sqrt(r^2) at zero interatomic distance.
+_DIST_EPS: Final = 1e-8
 _SPATIAL_DIMS: Final = 3
+
+
+@jt.typed
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class PairwiseDistances:
+    """Predicted and target interatomic distances paired with a local valid-pair mask."""
+
+    pred_dists: jt.Float[jt.Array, "batch num_atoms num_atoms"]
+    target_dists: jt.Float[jt.Array, "batch num_atoms num_atoms"]
+    pair_mask: jt.Float[jt.Array, "batch num_atoms num_atoms"]
 
 
 @jt.typed
@@ -151,3 +164,33 @@ def kabsch_align(
         + ref_centroid
     )
     return aligned * mask
+
+
+@jt.typed
+def pairwise_distances_and_mask(
+    *,
+    predicted_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+    target_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+    atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
+    cutoff: float,
+) -> PairwiseDistances:
+    """Computes pairwise Euclidean distances and the mask of distinct valid pairs within cutoff."""
+    _, num_atoms, _ = predicted_positions.shape
+    # (batch, num_atoms, num_atoms, 3) pairwise 3D coordinate differences x_i - x_j.
+    pred_offsets = predicted_positions[:, :, None, :] - predicted_positions[:, None, :, :]
+    target_offsets = target_positions[:, :, None, :] - target_positions[:, None, :, :]
+
+    # (batch, num_atoms, num_atoms) pairwise Euclidean distance matrices.
+    pred_dists = jnp.sqrt(jnp.sum(jnp.square(pred_offsets), axis=-1) + _DIST_EPS)
+    target_dists = jnp.sqrt(jnp.sum(jnp.square(target_offsets), axis=-1) + _DIST_EPS)
+
+    # (batch, num_atoms, num_atoms) mask for distinct valid atom pairs (i != j) within cutoff.
+    valid_pairs = atom_mask[:, :, None] & atom_mask[:, None, :]
+    not_self = ~(jnp.eye(num_atoms, dtype=jnp.bool_)[None, :, :])
+    within_cutoff = target_dists < cutoff
+    pair_mask = (valid_pairs & not_self & within_cutoff).astype(predicted_positions.dtype)
+    return PairwiseDistances(
+        pred_dists=pred_dists,
+        target_dists=target_dists,
+        pair_mask=pair_mask,
+    )

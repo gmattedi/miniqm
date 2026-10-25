@@ -18,8 +18,8 @@ from miniqm import config as config_lib
 from miniqm import jaxtypes as jt
 from miniqm.data import batch as batch_lib
 from miniqm.data import data_source
-from miniqm.diffusion import geometry
 from miniqm.diffusion import losses as losses_lib
+from miniqm.diffusion import metrics as metrics_lib
 from miniqm.diffusion import model as model_lib
 from miniqm.diffusion import noise as noise_lib
 from miniqm.diffusion import sampling as sampling_lib
@@ -29,7 +29,6 @@ _LOGGER: Final = logging.getLogger(__name__)
 # Standard QM9 conformer generation RMSD coverage thresholds (in Angstroms).
 _STRICT_RMSD_THRESHOLD_A: Final = 0.5
 _LOOSE_RMSD_THRESHOLD_A: Final = 1.0
-_DIST_EPS: Final = 1e-8
 
 
 class ValidationMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
@@ -39,20 +38,20 @@ class ValidationMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
     aligned_mse_loss: float
     distance_loss: float
     rmsd: float
-    lddt: float
 
 
 class SamplingMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
-    """Reverse-diffusion conformer generation RMSD and lDDT statistics on a validation batch."""
+    """Reverse-diffusion conformer generation RMSD, lDDT, and stereocenter statistics."""
 
     sampled_rmsd_mean: float
     sampled_rmsd_median: float
     sampled_lddt_mean: float
     sampled_lddt_median: float
+    stereocenter_violation_rate: float
 
 
 class DatasetSamplingMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
-    """Full reverse-diffusion conformer generation RMSD, lDDT, and coverage across a split."""
+    """Full reverse-diffusion conformer generation RMSD, lDDT, coverage, and stereocenter stats."""
 
     sampled_rmsd_mean: float
     sampled_rmsd_median: float
@@ -60,16 +59,19 @@ class DatasetSamplingMetrics(pydantic.BaseModel, frozen=True, extra="forbid"):
     sampled_lddt_median: float
     fraction_below_0_5a: float
     fraction_below_1_0a: float
+    stereocenter_violation_rate: float
 
 
 @jax.tree_util.register_dataclass
 @jt.typed
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SampledBatchStats:
-    """Per-molecule Kabsch RMSD and local lDDT for a batch of generated conformers."""
+    """Per-molecule Kabsch RMSD, local lDDT, and stereocenter counts for generated conformers."""
 
     rmsd: jt.Float[jt.Array, " batch"]
     lddt: jt.Float[jt.Array, " batch"]
+    num_stereo_violations: jt.Int[jt.Array, " batch"]
+    num_stereocenters: jt.Int[jt.Array, " batch"]
 
 
 class TestEvaluationReport(pydantic.BaseModel, frozen=True, extra="forbid"):
@@ -221,7 +223,6 @@ def evaluate_loss(
             np.average(tuple(float(out.distance_loss) for out, _ in batch_outputs), weights=weights)
         ),
         rmsd=float(np.average(tuple(float(out.rmsd) for out, _ in batch_outputs), weights=weights)),
-        lddt=float(np.average(tuple(float(out.lddt) for out, _ in batch_outputs), weights=weights)),
     )
 
 
@@ -234,7 +235,7 @@ def compute_sampled_metrics_per_molecule(
     model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
     sampling_config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> SampledBatchStats:
-    """Samples 3D conformers for a batch and returns per-molecule Kabsch RMSD and lDDT.
+    """Samples 3D conformers for a batch and returns per-molecule RMSD, lDDT, and stereo counts.
 
     Args:
         params: Model parameters to evaluate (typically EMA weights).
@@ -244,7 +245,7 @@ def compute_sampled_metrics_per_molecule(
         sampling_config: Reverse Euler integration configuration.
 
     Returns:
-        Per-molecule Kabsch-aligned coordinate RMSD and local lDDT scores.
+        Per-molecule Kabsch-aligned coordinate RMSD, local lDDT, and stereocenter violation counts.
     """
     denoiser = model_lib.Denoiser(config=model_config)
     generated = sampling_lib.sample_coordinates(
@@ -254,24 +255,29 @@ def compute_sampled_metrics_per_molecule(
         batch=batch,
         config=sampling_config,
     )
-    aligned = geometry.kabsch_align(
-        reference=batch.positions,
-        target=generated,
-        atom_mask=batch.atom_mask,
-    )
-    mask_f32 = batch.atom_mask.astype(generated.dtype)
-    # (batch,) valid atom counts per molecule, clamped to >= 1.
-    atom_counts = jnp.maximum(jnp.sum(mask_f32, axis=-1), 1.0)
-    # (batch, num_atoms) squared coordinate error per atom, zeroed on padded slots.
-    sq_err_per_atom = jnp.sum(jnp.square(aligned - batch.positions), axis=-1) * mask_f32
-    # (batch,) per-molecule Kabsch-aligned coordinate RMSD.
-    rmsd = jnp.sqrt(jnp.sum(sq_err_per_atom, axis=-1) / atom_counts + _DIST_EPS)
-    lddt = losses_lib.lddt_per_molecule(
+    rmsd = metrics_lib.rmsd_per_molecule(
         predicted_positions=generated,
         target_positions=batch.positions,
         atom_mask=batch.atom_mask,
     )
-    return SampledBatchStats(rmsd=rmsd, lddt=lddt)
+    lddt = metrics_lib.lddt_per_molecule(
+        predicted_positions=generated,
+        target_positions=batch.positions,
+        atom_mask=batch.atom_mask,
+    )
+    stereo_stats = metrics_lib.stereocenter_violations(
+        predicted_positions=generated,
+        target_positions=batch.positions,
+        atom_features=batch.atom_features,
+        bond_features=batch.bond_features,
+        atom_mask=batch.atom_mask,
+    )
+    return SampledBatchStats(
+        rmsd=rmsd,
+        lddt=lddt,
+        num_stereo_violations=stereo_stats.num_violations,
+        num_stereocenters=stereo_stats.num_stereocenters,
+    )
 
 
 @jt.typed
@@ -283,7 +289,7 @@ def evaluate_sampling_rmsd(
     model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
     sampling_config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> SamplingMetrics:
-    """Generates 3D conformers from Gaussian noise and computes Kabsch RMSD and lDDT.
+    """Generates 3D conformers from Gaussian noise and computes RMSD, lDDT, and stereo violations.
 
     Args:
         params: Model parameters to evaluate (typically EMA weights).
@@ -293,7 +299,7 @@ def evaluate_sampling_rmsd(
         sampling_config: Reverse Euler integration configuration.
 
     Returns:
-        Mean and median Kabsch RMSD and lDDT across the sampled validation batch.
+        Mean/median Kabsch RMSD and lDDT plus stereocenter violation rate across the batch.
     """
     stats = compute_sampled_metrics_per_molecule(
         params,
@@ -302,11 +308,14 @@ def evaluate_sampling_rmsd(
         model_config=model_config,
         sampling_config=sampling_config,
     )
+    total_violations = int(jnp.sum(stats.num_stereo_violations))
+    total_stereocenters = int(jnp.sum(stats.num_stereocenters))
     return SamplingMetrics(
         sampled_rmsd_mean=float(jnp.mean(stats.rmsd)),
         sampled_rmsd_median=float(jnp.median(stats.rmsd)),
         sampled_lddt_mean=float(jnp.mean(stats.lddt)),
         sampled_lddt_median=float(jnp.median(stats.lddt)),
+        stereocenter_violation_rate=total_violations / max(total_stereocenters, 1),
     )
 
 
@@ -320,7 +329,7 @@ def evaluate_dataset_sampling(
     model_config: config_lib.DenoiserConfig = config_lib.DEFAULT_DENOISER_CONFIG,
     sampling_config: config_lib.SamplingConfig = config_lib.DEFAULT_SAMPLING_CONFIG,
 ) -> DatasetSamplingMetrics:
-    """Evaluates reverse-diffusion conformer generation RMSD and lDDT across a data source.
+    """Evaluates reverse-diffusion conformer generation RMSD, lDDT, and stereo across a data source.
 
     Args:
         params: Model parameters to evaluate (typically EMA weights).
@@ -331,11 +340,13 @@ def evaluate_dataset_sampling(
         sampling_config: Reverse Euler integration configuration.
 
     Returns:
-        Mean and median RMSD and lDDT along with sub-0.5 A and sub-1.0 A coverage fractions.
+        Mean/median RMSD and lDDT, coverage fractions, and stereocenter violation rate.
     """
     batches = tuple(eval_source.iter_batches(batch_size=batch_size, drop_last=False))
     rmsd_chunks: list[np.ndarray] = []
     lddt_chunks: list[np.ndarray] = []
+    total_violations = 0
+    total_stereocenters = 0
     step_rng = rng
 
     with progress.Progress(
@@ -357,6 +368,8 @@ def evaluate_dataset_sampling(
             )
             rmsd_chunks.append(np.asarray(stats.rmsd, dtype=np.float32))
             lddt_chunks.append(np.asarray(stats.lddt, dtype=np.float32))
+            total_violations += int(jnp.sum(stats.num_stereo_violations))
+            total_stereocenters += int(jnp.sum(stats.num_stereocenters))
             progress_bar.advance(task_id)
 
     all_rmsds = np.concatenate(rmsd_chunks, axis=0)
@@ -368,6 +381,7 @@ def evaluate_dataset_sampling(
         sampled_lddt_median=float(np.median(all_lddts)),
         fraction_below_0_5a=float(np.mean(all_rmsds < _STRICT_RMSD_THRESHOLD_A)),
         fraction_below_1_0a=float(np.mean(all_rmsds < _LOOSE_RMSD_THRESHOLD_A)),
+        stereocenter_violation_rate=total_violations / max(total_stereocenters, 1),
     )
 
 
@@ -427,15 +441,16 @@ def run_evaluation(config: config_lib.EvalConfig) -> TestEvaluationReport:
         encoding="utf-8",
     )
     _LOGGER.info(
-        "Evaluated %d molecules at step=%d: test_loss=%.4f test_rmsd=%.3f A test_lddt=%.3f "
-        "sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f (<0.5A=%.1f%%, <1.0A=%.1f%%)",
+        "Evaluated %d molecules at step=%d: test_loss=%.4f test_rmsd=%.3f A "
+        "sampled_rmsd_mean=%.3f A sampled_lddt_mean=%.3f stereo_violations=%.1f%% "
+        "(<0.5A=%.1f%%, <1.0A=%.1f%%)",
         report.num_molecules,
         report.step,
         loss_metrics.total_loss,
         loss_metrics.rmsd,
-        loss_metrics.lddt,
         sampling_metrics.sampled_rmsd_mean,
         sampling_metrics.sampled_lddt_mean,
+        100.0 * sampling_metrics.stereocenter_violation_rate,
         100.0 * sampling_metrics.fraction_below_0_5a,
         100.0 * sampling_metrics.fraction_below_1_0a,
     )
