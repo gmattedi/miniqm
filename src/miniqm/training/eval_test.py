@@ -119,7 +119,7 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     assert saved_report["step"] == 5
 
     smiles_file = tmp_path / "molecules.smi"
-    smiles_file.write_text("F\nO\n", encoding="utf-8")
+    smiles_file.write_text("F\nCO\n", encoding="utf-8")
     output_sdf = tmp_path / "out.sdf"
     mols = eval_lib.run_smiles_sampling(
         config_lib.SampleSmilesConfig(
@@ -136,13 +136,13 @@ def test_run_evaluation_and_smiles_sampling_write_outputs(tmp_path: pathlib.Path
     supplier = Chem.SDMolSupplier(str(output_sdf), removeHs=False)
     loaded_mols = tuple(supplier)
     assert len(loaded_mols) == 4
-    assert loaded_mols[0].GetNumAtoms() == 2
+    assert loaded_mols[0].GetNumAtoms() == 1
     assert loaded_mols[0].GetProp(batch_lib.SdfProperty.CONFORMER_ID) == "0"
     assert loaded_mols[0].GetProp(batch_lib.SdfProperty.SEED) == "10"
-    assert loaded_mols[1].GetNumAtoms() == 2
+    assert loaded_mols[1].GetNumAtoms() == 1
     assert loaded_mols[1].GetProp(batch_lib.SdfProperty.CONFORMER_ID) == "1"
     assert loaded_mols[1].GetProp(batch_lib.SdfProperty.SEED) == "11"
-    assert loaded_mols[2].GetNumAtoms() == 3
+    assert loaded_mols[2].GetNumAtoms() == 2
 
 
 @pytest.mark.parametrize(

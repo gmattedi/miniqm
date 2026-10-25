@@ -40,8 +40,12 @@ def _make_synthetic_batch() -> batch_lib.JaxBatch:
     raw_positions = jax.random.normal(pos_key, (2, 5, 3), dtype=jnp.float32)
     positions = geometry.zero_center_of_mass(raw_positions, atom_mask)
     return batch_lib.JaxBatch(
-        atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
-        bond_features=jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32),
+        atom_features=jax.random.normal(
+            atom_key, (2, 5, batch_lib.NUM_ATOM_FEATURES), dtype=jnp.float32
+        ),
+        bond_features=jax.random.normal(
+            bond_key, (2, 5, 5, batch_lib.NUM_BOND_FEATURES), dtype=jnp.float32
+        ),
         atom_mask=atom_mask,
         positions=positions,
     )

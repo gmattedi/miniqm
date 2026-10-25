@@ -8,7 +8,7 @@ import py3Dmol
 
 from miniqm import jaxtypes as jt
 
-_ELEMENT_SYMBOLS: Final = ("H", "C", "N", "O", "F")
+_ELEMENT_SYMBOLS: Final = ("C", "N", "O", "F")
 _NUM_ELEMENTS: Final = len(_ELEMENT_SYMBOLS)
 _MIN_TARGET_RMS: Final = 0.8
 _RMS_FLOOR: Final = 1e-8
@@ -48,11 +48,11 @@ def atom_symbols_from_features(
     """Decodes valid-atom element symbols from one-hot atom feature vectors.
 
     Args:
-        atom_features: Padded per-atom feature matrix whose first 5 channels are one-hot elements.
+        atom_features: Padded per-atom feature matrix whose first 4 channels are one-hot elements.
         atom_mask: Valid-atom mask.
 
     Returns:
-        Tuple of atomic element symbols (H, C, N, O, F) for valid atoms.
+        Tuple of atomic element symbols (C, N, O, F) for valid atoms.
     """
     valid_element_one_hot = atom_features[atom_mask, :_NUM_ELEMENTS]
     element_indices = np.argmax(valid_element_one_hot, axis=-1)

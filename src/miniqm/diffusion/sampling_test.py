@@ -28,8 +28,12 @@ class _SamplerTestSetup:
 def _make_test_setup() -> _SamplerTestSetup:
     atom_key, bond_key, init_key = jax.random.split(jax.random.key(0), 3)
     graph_batch = batch_lib.JaxBatch(
-        atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
-        bond_features=jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32),
+        atom_features=jax.random.normal(
+            atom_key, (2, 5, batch_lib.NUM_ATOM_FEATURES), dtype=jnp.float32
+        ),
+        bond_features=jax.random.normal(
+            bond_key, (2, 5, 5, batch_lib.NUM_BOND_FEATURES), dtype=jnp.float32
+        ),
         atom_mask=jnp.array(
             [
                 [True, True, True, True, False],

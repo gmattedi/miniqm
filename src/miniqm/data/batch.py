@@ -16,13 +16,14 @@ from rdkit.Chem import rdDetermineBonds
 from miniqm import jaxtypes as jt
 from miniqm.data import schema
 
-MAX_ATOMS: Final = 29
+MAX_ATOMS: Final = 9
 _SPATIAL_DIMS: Final = 3
 _MAX_COVALENT_BOND_A: Final = 2.1
 _CIP_CODE_PROP: Final = "_CIPCode"
 
-_ELEMENTS: Final = (1, 6, 7, 8, 9)
+_ELEMENTS: Final = (6, 7, 8, 9)
 _DEGREES: Final = (1, 2, 3, 4)
+_TOTAL_HS: Final = (0, 1, 2, 3, 4)
 _FORMAL_CHARGES: Final = (-1, 0, 1)
 _HYBRIDIZATIONS: Final = (
     Chem.HybridizationType.SP,
@@ -39,6 +40,7 @@ _BOND_TYPES: Final = (
 NUM_ATOM_FEATURES: Final = (
     len(_ELEMENTS)
     + (len(_DEGREES) + 1)
+    + len(_TOTAL_HS)
     + len(_FORMAL_CHARGES)
     + (len(_HYBRIDIZATIONS) + 1)
     + 2
@@ -141,7 +143,7 @@ def _one_hot(
 
 
 def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
-    """Builds the 1D feature vector for a single RDKit atom."""
+    """Builds the 1D feature vector for a single heavy RDKit atom."""
     cahn_ingold_prelog = atom.GetProp(_CIP_CODE_PROP) if atom.HasProp(_CIP_CODE_PROP) else ""
     chirality_one_hot = (
         1.0 if cahn_ingold_prelog not in _CHIRAL_CODES else 0.0,
@@ -150,6 +152,7 @@ def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
     return (
         *_one_hot(atom.GetAtomicNum(), _ELEMENTS),
         *_one_hot(atom.GetTotalDegree(), _DEGREES, include_unknown=True),
+        *_one_hot(atom.GetTotalNumHs(), _TOTAL_HS),
         *_one_hot(atom.GetFormalCharge(), _FORMAL_CHARGES),
         *_one_hot(atom.GetHybridization(), _HYBRIDIZATIONS, include_unknown=True),
         1.0 if atom.GetIsAromatic() else 0.0,
@@ -158,16 +161,31 @@ def _encode_atom(atom: Chem.Atom) -> tuple[float, ...]:
     )
 
 
+def _strip_hydrogens_preserving_cip(mol: Chem.Mol) -> Chem.Mol:
+    """Removes explicit hydrogens while preserving 3D-perceived CIP codes on heavy atoms."""
+    heavy_cip_codes = tuple(
+        atom.GetProp(_CIP_CODE_PROP) if atom.HasProp(_CIP_CODE_PROP) else ""
+        for atom in mol.GetAtoms()
+        if atom.GetAtomicNum() > 1
+    )
+    heavy_mol = Chem.RemoveHs(mol)
+    for atom, cip_code in zip(heavy_mol.GetAtoms(), heavy_cip_codes, strict=True):
+        if cip_code:
+            atom.SetProp(_CIP_CODE_PROP, cip_code)
+    return heavy_mol
+
+
 def _featurize_rdkit_mol(mol: Chem.Mol) -> GraphFeatures:
-    """Extracts atom and bond feature arrays from an RDKit molecule."""
+    """Extracts heavy-atom and bond feature arrays from an RDKit molecule."""
     if mol.GetNumConformers() > 0:
         Chem.AssignStereochemistryFrom3D(mol)
     else:
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
-    num_atoms = mol.GetNumAtoms()
+    heavy_mol = _strip_hydrogens_preserving_cip(mol)
+    num_atoms = heavy_mol.GetNumAtoms()
 
     atom_features = np.array(
-        tuple(_encode_atom(atom) for atom in mol.GetAtoms()),
+        tuple(_encode_atom(atom) for atom in heavy_mol.GetAtoms()),
         dtype=np.float32,
     )
 
@@ -176,7 +194,7 @@ def _featurize_rdkit_mol(mol: Chem.Mol) -> GraphFeatures:
     bond_features = np.zeros((num_atoms, num_atoms, num_bond_types + 2), dtype=np.float32)
     bond_features[:, :, 0] = 1.0
 
-    for bond in mol.GetBonds():
+    for bond in heavy_mol.GetBonds():
         begin_idx = bond.GetBeginAtomIdx()
         end_idx = bond.GetEndAtomIdx()
         bond_channel_values = (
@@ -199,13 +217,13 @@ def _mol_from_smiles(smiles: str) -> Chem.Mol | None:
 
 
 def featurize_smiles(smiles: str) -> GraphFeatures:
-    """Computes unpadded 2D atom and bond features directly from a SMILES string.
+    """Computes unpadded heavy-atom 2D atom and bond features directly from a SMILES string.
 
     Args:
         smiles: Input SMILES string.
 
     Returns:
-        Unpadded atom and bond feature arrays with explicit hydrogens added.
+        Unpadded heavy-atom and bond feature arrays.
 
     Raises:
         ValueError: If the SMILES string cannot be parsed by RDKit.
@@ -213,8 +231,7 @@ def featurize_smiles(smiles: str) -> GraphFeatures:
     base_mol = _mol_from_smiles(smiles)
     if base_mol is None:
         raise ValueError(f"Failed to parse SMILES {smiles!r}.")
-    mol_with_hs = Chem.AddHs(base_mol)
-    return _featurize_rdkit_mol(mol_with_hs)
+    return _featurize_rdkit_mol(base_mol)
 
 
 @jt.typed
@@ -476,30 +493,30 @@ def build_conformer_mol(
     smiles: str,
     positions: jt.Float[np.ndarray, "max_atoms 3"],
 ) -> Chem.Mol:
-    """Builds an explicit-hydrogen RDKit molecule with a 3D conformer from padded coordinates.
+    """Builds a heavy-atom RDKit molecule with a 3D conformer from padded coordinates.
 
     Args:
         smiles: Input SMILES string defining the molecular graph.
-        positions: Padded 3D coordinates in Angstroms ordered by explicit-hydrogen SMILES atoms.
+        positions: Padded 3D coordinates in Angstroms ordered by heavy SMILES atoms.
 
     Returns:
-        RDKit molecule with explicit hydrogens and a single 3D conformer attached.
+        Heavy-atom RDKit molecule with a single 3D conformer attached.
 
     Raises:
-        ValueError: If the SMILES string is invalid or has more atoms than positions.
+        ValueError: If the SMILES string is invalid or has more heavy atoms than positions.
     """
     base_mol = _mol_from_smiles(smiles)
     if base_mol is None:
         raise ValueError(f"Failed to parse SMILES {smiles!r}.")
-    mol_with_hs = Chem.AddHs(base_mol)
-    num_atoms = mol_with_hs.GetNumAtoms()
+    heavy_mol = Chem.RemoveHs(base_mol)
+    num_atoms = heavy_mol.GetNumAtoms()
     max_atoms, _ = positions.shape
     if num_atoms > max_atoms:
         raise ValueError(f"Molecule {smiles!r} has {num_atoms} atoms, exceeding {max_atoms=}.")
-    _attach_3d_conformer(mol_with_hs, positions[:num_atoms])
-    mol_with_hs.SetProp(SdfProperty.NAME, smiles)
-    mol_with_hs.SetProp(SdfProperty.SMILES, smiles)
-    return mol_with_hs
+    _attach_3d_conformer(heavy_mol, positions[:num_atoms])
+    heavy_mol.SetProp(SdfProperty.NAME, smiles)
+    heavy_mol.SetProp(SdfProperty.SMILES, smiles)
+    return heavy_mol
 
 
 def collate_batch(
@@ -507,14 +524,14 @@ def collate_batch(
     *,
     max_atoms: int = MAX_ATOMS,
 ) -> Batch:
-    """Featurizes and pads a collection of molecules into a fixed-shape batch.
+    """Featurizes and pads a collection of molecules into a fixed-shape heavy-atom batch.
 
     Args:
         molecules: Non-empty collection of unpadded molecules.
-        max_atoms: Padded atom dimension.
+        max_atoms: Padded heavy-atom dimension.
 
     Returns:
-        Padded batch with zero-centered coordinates and valid-atom mask.
+        Padded batch with zero-centered heavy-atom coordinates and valid-atom mask.
 
     Raises:
         ValueError: If molecules is empty or a molecule exceeds max_atoms.
@@ -528,6 +545,8 @@ def collate_batch(
     positions = np.zeros((batch_size, max_atoms, _SPATIAL_DIMS), dtype=np.float32)
 
     for batch_idx, mol in enumerate(molecules):
-        positions[batch_idx, : mol.num_atoms] = center_positions(mol.positions)
+        heavy_positions = mol.positions[mol.atomic_numbers > 1]
+        num_heavy, _ = heavy_positions.shape
+        positions[batch_idx, :num_heavy] = center_positions(heavy_positions)
 
     return dataclasses.replace(graph_batch, positions=positions)

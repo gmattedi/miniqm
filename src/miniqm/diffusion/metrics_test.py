@@ -66,23 +66,31 @@ def test_lddt_per_molecule_scores_distance_errors_across_thresholds(
 
 
 @pytest.mark.parametrize(
-    ("z_scale", "expected_violations", "expected_rate"),
+    ("chiral_smiles", "z_scale", "expected_violations", "expected_rate"),
     (
-        (1.0, (0, 0), 0.0),
-        (-1.0, (1, 0), 1.0),
+        ("C[C@H](N)O", 1.0, (0, 0), 0.0),
+        ("C[C@H](N)O", -1.0, (1, 0), 1.0),
+        ("C[C@](F)(N)O", 1.0, (0, 0), 0.0),
+        ("C[C@](F)(N)O", -1.0, (1, 0), 1.0),
     ),
-    ids=("proper_rotation_preserves_stereo", "reflection_inverts_stereo"),
+    ids=(
+        "tertiary_proper_rotation",
+        "tertiary_reflection",
+        "quaternary_proper_rotation",
+        "quaternary_reflection",
+    ),
 )
 def test_stereocenter_violations_detects_enantiomer_inversion(
+    chiral_smiles: str,
     z_scale: float,
     expected_violations: tuple[int, int],
     expected_rate: float,
 ):
-    # Chiral 1-aminoethanol C[C@H](N)O (12 atoms with H) paired with achiral ethane CC (8 atoms).
-    host_batch = batch_lib.collate_smiles(("C[C@H](N)O", "CC"), max_atoms=12)
+    host_batch = batch_lib.collate_smiles((chiral_smiles, "CC"))
     jax_batch = host_batch.to_jax()
     target_positions = (
-        jax.random.normal(jax.random.key(7), (2, 12, 3)) * jax_batch.atom_mask[..., None]
+        jax.random.normal(jax.random.key(7), jax_batch.positions.shape)
+        * jax_batch.atom_mask[..., None]
     )
     rotated_positions = geometry.random_rotation(
         jax.random.key(11),

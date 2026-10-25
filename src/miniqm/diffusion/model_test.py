@@ -40,8 +40,12 @@ def _make_dummy_inputs() -> _ModelTestInputs:
     )
     sigma = jnp.array([0.5, 2.0], dtype=jnp.float32)
     graph_batch = batch_lib.JaxBatch(
-        atom_features=jax.random.normal(atom_key, (2, 5, 22), dtype=jnp.float32),
-        bond_features=jax.random.normal(bond_key, (2, 5, 5, 6), dtype=jnp.float32),
+        atom_features=jax.random.normal(
+            atom_key, (2, 5, batch_lib.NUM_ATOM_FEATURES), dtype=jnp.float32
+        ),
+        bond_features=jax.random.normal(
+            bond_key, (2, 5, 5, batch_lib.NUM_BOND_FEATURES), dtype=jnp.float32
+        ),
         atom_mask=atom_mask,
         positions=jnp.zeros((2, 5, 3), dtype=jnp.float32),
     )
