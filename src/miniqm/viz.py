@@ -7,12 +7,12 @@ import numpy as np
 import py3Dmol
 
 from miniqm import jaxtypes as jt
+from miniqm.data import batch as batch_lib
 
-_ELEMENT_SYMBOLS: Final = ("C", "N", "O", "F")
-_NUM_ELEMENTS: Final = len(_ELEMENT_SYMBOLS)
 _MIN_TARGET_RMS: Final = 0.8
 _RMS_FLOOR: Final = 1e-8
 _FINAL_FRAME_REPEATS: Final = 8
+_TRAJECTORY_ATOM_NDIM: Final = 3
 _XYZ_FORMAT: Final = "xyz"
 _DEFAULT_MOLECULE_WIDTH: Final = 450
 _DEFAULT_MOLECULE_HEIGHT: Final = 350
@@ -44,19 +44,33 @@ _TRAJECTORY_STYLE: Final = immutabledict.immutabledict(
 def atom_symbols_from_features(
     atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"],
     atom_mask: jt.Bool[np.ndarray, " num_atoms"],
+    *,
+    cond_atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
 ) -> tuple[str, ...]:
-    """Decodes valid-atom element symbols from one-hot atom feature vectors.
+    """Decodes valid-atom element symbols from atom feature vectors and optional conditioning.
 
     Args:
         atom_features: Padded per-atom feature matrix whose first 4 channels are one-hot elements.
         atom_mask: Valid-atom mask.
+        cond_atom_features: Optional ground-truth or template atom feature matrix.
+        atom_cond_mask: Optional boolean mask of conditioned atom feature channels.
+        cond_bond_features: Optional ground-truth or template bond feature tensor.
+        bond_cond_mask: Optional boolean mask of conditioned bond feature channels.
 
     Returns:
         Tuple of atomic element symbols (C, N, O, F) for valid atoms.
     """
-    valid_element_one_hot = atom_features[atom_mask, :_NUM_ELEMENTS]
-    element_indices = np.argmax(valid_element_one_hot, axis=-1)
-    return tuple(_ELEMENT_SYMBOLS[int(idx)] for idx in element_indices)
+    return batch_lib.decode_atom_symbols(
+        atom_features,
+        atom_mask,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
 
 
 @jt.typed
@@ -65,6 +79,10 @@ def format_xyz_block(
     atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"],
     atom_mask: jt.Bool[np.ndarray, " num_atoms"],
     *,
+    cond_atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
     comment: str = "",
 ) -> str:
     """Formats the valid atoms of a molecule into an XYZ coordinate block.
@@ -73,12 +91,23 @@ def format_xyz_block(
         positions: Padded 3D coordinates in Angstroms.
         atom_features: Padded per-atom feature matrix.
         atom_mask: Valid-atom mask.
+        cond_atom_features: Optional ground-truth or template atom feature matrix.
+        atom_cond_mask: Optional boolean mask of conditioned atom feature channels.
+        cond_bond_features: Optional ground-truth or template bond feature tensor.
+        bond_cond_mask: Optional boolean mask of conditioned bond feature channels.
         comment: Optional header comment line.
 
     Returns:
         Standard XYZ string for the valid atoms of the molecule.
     """
-    symbols = atom_symbols_from_features(atom_features, atom_mask)
+    symbols = atom_symbols_from_features(
+        atom_features,
+        atom_mask,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
     valid_xyz = positions[atom_mask]
     atom_lines = tuple(
         f"{symbol:<2s} {float(valid_xyz[atom_idx, 0]):12.6f} "
@@ -91,25 +120,39 @@ def format_xyz_block(
 @jt.typed
 def format_xyz_trajectory(
     trajectory: jt.Float[np.ndarray, "num_frames num_atoms 3"],
-    atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"],
+    atom_features: jt.Float[np.ndarray, "*frames num_atoms num_atom_features"],
     atom_mask: jt.Bool[np.ndarray, " num_atoms"],
+    *,
+    cond_atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
 ) -> str:
     """Formats a sequence of 3D coordinate frames into a multi-frame XYZ string.
 
     Args:
         trajectory: Padded 3D coordinate frames.
-        atom_features: Padded per-atom feature matrix.
+        atom_features: Static or per-frame padded per-atom feature array.
         atom_mask: Valid-atom mask.
+        cond_atom_features: Optional ground-truth or template atom feature matrix.
+        atom_cond_mask: Optional boolean mask of conditioned atom feature channels.
+        cond_bond_features: Optional ground-truth or template bond feature tensor.
+        bond_cond_mask: Optional boolean mask of conditioned bond feature channels.
 
     Returns:
         Concatenated multi-frame XYZ string.
     """
     num_frames, _, _ = trajectory.shape
+    is_per_frame = atom_features.ndim == _TRAJECTORY_ATOM_NDIM
     blocks = tuple(
         format_xyz_block(
             trajectory[frame_idx],
-            atom_features,
+            atom_features[frame_idx] if is_per_frame else atom_features,
             atom_mask,
+            cond_atom_features=cond_atom_features,
+            atom_cond_mask=atom_cond_mask,
+            cond_bond_features=cond_bond_features,
+            bond_cond_mask=bond_cond_mask,
             comment=f"frame {frame_idx}",
         )
         for frame_idx in range(num_frames)
@@ -215,9 +258,13 @@ def normalize_trajectory_frames(
 @jt.typed
 def show_trajectory(
     trajectory: jt.Float[np.ndarray, "num_frames num_atoms 3"],
-    atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"],
+    atom_features: jt.Float[np.ndarray, "*frames num_atoms num_atom_features"],
     atom_mask: jt.Bool[np.ndarray, " num_atoms"],
     *,
+    cond_atom_features: jt.Float[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "num_atoms num_atoms num_bond_features"] | None = None,
     normalize_scale: bool = True,
     interval_ms: int = _DEFAULT_INTERVAL_MS,
     width: int = _DEFAULT_VIEWER_WIDTH,
@@ -227,8 +274,12 @@ def show_trajectory(
 
     Args:
         trajectory: Padded 3D coordinate frames.
-        atom_features: Padded per-atom feature matrix.
+        atom_features: Static or per-frame padded per-atom feature array.
         atom_mask: Valid-atom mask.
+        cond_atom_features: Optional ground-truth or template atom feature matrix.
+        atom_cond_mask: Optional boolean mask of conditioned atom feature channels.
+        cond_bond_features: Optional ground-truth or template bond feature tensor.
+        bond_cond_mask: Optional boolean mask of conditioned bond feature channels.
         normalize_scale: Whether to rescale frames to a consistent molecular RMS spread.
         interval_ms: Delay between animation frames in milliseconds.
         width: Viewer width in pixels.
@@ -242,7 +293,23 @@ def show_trajectory(
     )
     final_hold = np.repeat(display_trajectory[-1:], _FINAL_FRAME_REPEATS, axis=0)
     padded_trajectory = np.concatenate((display_trajectory, final_hold), axis=0)
-    xyz_trajectory = format_xyz_trajectory(padded_trajectory, atom_features, atom_mask)
+    padded_atom_features = (
+        np.concatenate(
+            (atom_features, np.repeat(atom_features[-1:], _FINAL_FRAME_REPEATS, axis=0)),
+            axis=0,
+        )
+        if atom_features.ndim == _TRAJECTORY_ATOM_NDIM
+        else atom_features
+    )
+    xyz_trajectory = format_xyz_trajectory(
+        padded_trajectory,
+        padded_atom_features,
+        atom_mask,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
     viewer = py3Dmol.view(width=width, height=height)
     viewer.addModelsAsFrames(xyz_trajectory, _XYZ_FORMAT)
     viewer.setStyle(dict(_TRAJECTORY_STYLE))

@@ -30,6 +30,7 @@ _SINGLE_BOND_VALENCE: Final = 1.0
 _HALF_WEIGHT: Final = 0.5
 
 _ELEMENTS: Final = (6, 7, 8, 9)
+_SYMBOL_BY_ELEMENT: Final = immutabledict.immutabledict({6: "C", 7: "N", 8: "O", 9: "F"})
 _DEGREES: Final = (1, 2, 3, 4)
 _TOTAL_HS: Final = (0, 1, 2, 3, 4)
 _FORMAL_CHARGES: Final = (-1, 0, 1)
@@ -671,6 +672,102 @@ def _min_conditioned_bond_valences(
 
 
 @jt.typed
+def _resolve_effective_atoms(
+    atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    *,
+    cond_atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"] | None,
+    atom_cond_mask: jt.Bool[np.ndarray, "max_atoms num_atom_features"] | None,
+) -> jt.Float[np.ndarray, "max_atoms num_atom_features"]:
+    """Overlays conditioned atom feature channels onto predicted atom features."""
+    if cond_atom_features is None or atom_cond_mask is None:
+        return atom_features
+    return np.where(
+        atom_cond_mask,
+        np.where(cond_atom_features > 0.0, 1.0, _MASKED_LOGIT),
+        atom_features,
+    )
+
+
+@jt.typed
+def _decode_atom_element_and_hs(
+    src_i: int,
+    min_bond_valence: float,
+    *,
+    effective_atoms: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    cond_atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"] | None,
+    atom_cond_mask: jt.Bool[np.ndarray, "max_atoms num_atom_features"] | None,
+) -> tuple[int, float]:
+    """Selects the highest-logit valence-compatible atomic number and conditioned H count."""
+    cond_hs = (
+        float(_TOTAL_HS[int(np.argmax(cond_atom_features[src_i, _TOTAL_HS_SLICE]))])
+        if (
+            cond_atom_features is not None
+            and atom_cond_mask is not None
+            and bool(np.all(atom_cond_mask[src_i, _TOTAL_HS_SLICE]))
+        )
+        else 0.0
+    )
+    required_valence = cond_hs + min_bond_valence
+    feasible_mask = np.array(
+        [_MAX_VALENCE_BY_ELEMENT[el] >= required_valence for el in _ELEMENTS],
+        dtype=np.bool_,
+    )
+    element_logits = np.where(
+        feasible_mask,
+        effective_atoms[src_i, _ELEMENT_SLICE],
+        _MASKED_LOGIT,
+    )
+    return _ELEMENTS[int(np.argmax(element_logits))], cond_hs
+
+
+@jt.typed
+def decode_atom_symbols(
+    atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    atom_mask: jt.Bool[np.ndarray, " max_atoms"],
+    *,
+    cond_atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "max_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "max_atoms max_atoms num_bond_features"] | None = None,
+) -> tuple[str, ...]:
+    """Decodes valence-compatible element symbols for valid atoms from feature arrays.
+
+    Args:
+        atom_features: Padded per-atom feature matrix.
+        atom_mask: Valid-atom mask.
+        cond_atom_features: Optional ground-truth or template atom feature matrix.
+        atom_cond_mask: Optional boolean mask of conditioned atom feature channels.
+        cond_bond_features: Optional ground-truth or template bond feature tensor.
+        bond_cond_mask: Optional boolean mask of conditioned bond feature channels.
+
+    Returns:
+        Tuple of atomic element symbols (C, N, O, F) for valid atoms.
+    """
+    effective_atoms = _resolve_effective_atoms(
+        atom_features,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
+    )
+    indexed_atoms = tuple(enumerate(int(idx) for idx in np.flatnonzero(atom_mask)))
+    min_bond_valences = _min_conditioned_bond_valences(
+        indexed_atoms,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
+    symbols: list[str] = []
+    for dst_i, src_i in indexed_atoms:
+        atomic_num, _ = _decode_atom_element_and_hs(
+            src_i,
+            min_bond_valences[dst_i],
+            effective_atoms=effective_atoms,
+            cond_atom_features=cond_atom_features,
+            atom_cond_mask=atom_cond_mask,
+        )
+        symbols.append(_SYMBOL_BY_ELEMENT[atomic_num])
+    return tuple(symbols)
+
+
+@jt.typed
 def _add_decoded_atoms(
     rw_mol: Chem.RWMol,
     indexed_atoms: Collection[tuple[int, int]],
@@ -689,26 +786,13 @@ def _add_decoded_atoms(
     )
     remaining_valences: list[float] = []
     for dst_i, src_i in indexed_atoms:
-        cond_hs = (
-            float(_TOTAL_HS[int(np.argmax(cond_atom_features[src_i, _TOTAL_HS_SLICE]))])
-            if (
-                cond_atom_features is not None
-                and atom_cond_mask is not None
-                and bool(np.all(atom_cond_mask[src_i, _TOTAL_HS_SLICE]))
-            )
-            else 0.0
+        atomic_num, cond_hs = _decode_atom_element_and_hs(
+            src_i,
+            min_bond_valences[dst_i],
+            effective_atoms=effective_atoms,
+            cond_atom_features=cond_atom_features,
+            atom_cond_mask=atom_cond_mask,
         )
-        required_valence = cond_hs + min_bond_valences[dst_i]
-        feasible_mask = np.array(
-            [_MAX_VALENCE_BY_ELEMENT[el] >= required_valence for el in _ELEMENTS],
-            dtype=np.bool_,
-        )
-        element_logits = np.where(
-            feasible_mask,
-            effective_atoms[src_i, _ELEMENT_SLICE],
-            _MASKED_LOGIT,
-        )
-        atomic_num = _ELEMENTS[int(np.argmax(element_logits))]
         charge = _FORMAL_CHARGES[int(np.argmax(effective_atoms[src_i, _CHARGE_SLICE]))]
         rd_atom = Chem.Atom(atomic_num)
         rd_atom.SetFormalCharge(charge)
@@ -872,14 +956,10 @@ def build_generated_mol(
         RDKit molecule with decoded atom types, bond orders, and 3D conformer attached.
     """
     _disable_rdkit_logging()
-    effective_atoms = (
-        np.where(
-            atom_cond_mask,
-            np.where(cond_atom_features > 0.0, 1.0, _MASKED_LOGIT),
-            atom_features,
-        )
-        if cond_atom_features is not None and atom_cond_mask is not None
-        else atom_features
+    effective_atoms = _resolve_effective_atoms(
+        atom_features,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
     )
     effective_bonds = (
         np.where(

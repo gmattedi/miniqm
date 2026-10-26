@@ -59,3 +59,48 @@ def test_normalize_trajectory_frames_rescales_high_variance_frames():
     normalized = viz.normalize_trajectory_frames(trajectory, atom_mask)
     np.testing.assert_allclose(normalized[0, atom_mask], final_frame[atom_mask], rtol=1e-5)
     np.testing.assert_allclose(normalized[1, atom_mask], final_frame[atom_mask], rtol=1e-5)
+
+
+def test_format_xyz_trajectory_supports_per_frame_features_and_valence_conditioning():
+    template_batch = batch.collate_smiles(("U~U(=U)",))
+    atom_mask = template_batch.atom_mask[0]
+    max_atoms, num_atom_features = template_batch.atom_features[0].shape
+    trajectory = np.zeros((2, max_atoms, 3), dtype=np.float32)
+
+    frame_0_atoms = np.zeros((max_atoms, num_atom_features), dtype=np.float32)
+    frame_0_atoms[0, 0] = 5.0  # C
+    frame_0_atoms[1, 0] = 5.0  # C
+    frame_0_atoms[2, 2] = 5.0  # O
+
+    frame_1_atoms = np.zeros((max_atoms, num_atom_features), dtype=np.float32)
+    frame_1_atoms[0, 0] = 5.0  # C
+    frame_1_atoms[1, 2] = 5.0  # O (infeasible for ~U(=U) requiring valence >= 3)
+    frame_1_atoms[1, 1] = 2.0  # N (next highest feasible element with valence >= 3)
+    frame_1_atoms[2, 0] = 5.0  # C
+    atom_trajectory = np.stack((frame_0_atoms, frame_1_atoms), axis=0)
+
+    xyz_trajectory = viz.format_xyz_trajectory(
+        trajectory,
+        atom_trajectory,
+        atom_mask,
+        cond_atom_features=template_batch.atom_features[0],
+        atom_cond_mask=template_batch.atom_cond_mask[0],
+        cond_bond_features=template_batch.bond_features[0],
+        bond_cond_mask=template_batch.bond_cond_mask[0],
+    )
+    lines = xyz_trajectory.strip().splitlines()
+    frame_0_elements = tuple(line.split()[0] for line in lines[2:5])
+    frame_1_elements = tuple(line.split()[0] for line in lines[7:10])
+    assert frame_0_elements == ("C", "C", "O")
+    assert frame_1_elements == ("C", "N", "C")
+
+    viewer = viz.show_trajectory(
+        trajectory,
+        atom_trajectory,
+        atom_mask,
+        cond_atom_features=template_batch.atom_features[0],
+        atom_cond_mask=template_batch.atom_cond_mask[0],
+        cond_bond_features=template_batch.bond_features[0],
+        bond_cond_mask=template_batch.bond_cond_mask[0],
+    )
+    assert isinstance(viewer, py3Dmol.view)
