@@ -12,6 +12,7 @@ DEFAULT_TRAIN_PATH: Final = pathlib.Path(f"data/{schema.Split.TRAIN}.parquet")
 DEFAULT_VAL_PATH: Final = pathlib.Path(f"data/{schema.Split.VALIDATION}.parquet")
 DEFAULT_TEST_PATH: Final = pathlib.Path(f"data/{schema.Split.TEST}.parquet")
 DEFAULT_RUN_DIR: Final = pathlib.Path("runs/qm9_experiment")
+DEFAULT_PRETRAINED_DIR: Final = pathlib.Path("pretrained_weights")
 DEFAULT_SAMPLED_SDF: Final = pathlib.Path("sampled_conformers.sdf")
 DEFAULT_SMILES: Final = ("CCO", "c1ccccc1")
 
@@ -218,7 +219,7 @@ class RunConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     train: TrainConfig = TrainConfig()
     sampling: SamplingConfig = SamplingConfig()
     batch_size: pydantic.PositiveInt = 64
-    num_steps: pydantic.PositiveInt = 50_000
+    num_steps: pydantic.PositiveInt = 100_000
     log_every: pydantic.PositiveInt = 50
     eval_every: pydantic.PositiveInt = 500
     sample_every: pydantic.PositiveInt = 1_000
@@ -244,7 +245,7 @@ class EvalConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
         seed: PRNG seed for teacher-forced noise and reverse-ODE sampling.
     """
 
-    run_dir: pathlib.Path = DEFAULT_RUN_DIR
+    run_dir: pathlib.Path = DEFAULT_PRETRAINED_DIR
     test_path: pathlib.Path = DEFAULT_TEST_PATH
     checkpoint_name: str = CheckpointName.BEST
     use_ema: bool = True
@@ -270,7 +271,7 @@ class SampleSmilesConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
         seed: Base PRNG seed for reverse-ODE coordinate sampling.
     """
 
-    run_dir: pathlib.Path = DEFAULT_RUN_DIR
+    run_dir: pathlib.Path = DEFAULT_PRETRAINED_DIR
     smiles: tuple[str, ...] = DEFAULT_SMILES
     smiles_file: pathlib.Path | None = None
     checkpoint_name: str = CheckpointName.BEST

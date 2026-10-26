@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "miniqm"
 version = "0.1.0"
-description = "Mini diffusion model for molecular coordinate generation on QM9."
+description = "Joint 2D+3D molecular diffusion on heavy-atom QM9 graphs in JAX."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

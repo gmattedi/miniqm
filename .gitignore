@@ -19,6 +19,8 @@ uv.lock
 *.parquet
 data/raw/
 checkpoints/
+!pretrained_weights/checkpoints/
+!pretrained_weights/checkpoints/**
 outputs/
 wandb/
 
