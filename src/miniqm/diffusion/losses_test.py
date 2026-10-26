@@ -145,6 +145,6 @@ def test_compute_diffusion_loss_includes_atom_and_bond_feature_mse():
     assert float(output.bond_loss) > 0.0
     np.testing.assert_allclose(
         float(output.total_loss),
-        0.25 * float(output.atom_loss + output.bond_loss),
+        0.25 * float(output.atom_loss) + 0.5 * float(output.bond_loss),
         rtol=1e-5,
     )

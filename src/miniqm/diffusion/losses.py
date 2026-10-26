@@ -124,14 +124,14 @@ def atom_feature_loss(
     atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
     config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> jt.Float[jt.Array, ""]:
-    """Computes EDM-weighted MSE on continuous one-hot atom features over valid atoms."""
+    """Computes EDM-weighted squared error on continuous one-hot atom features over valid atoms."""
     atom_counts = jnp.maximum(jnp.sum(atom_mask, axis=-1), 1)
-    # (batch, num_atoms) mean squared feature error per valid atom.
-    per_atom_mse = (
-        jnp.mean(jnp.square(predicted_atom_features - target_atom_features), axis=-1) * atom_mask
+    # (batch, num_atoms) squared feature error summed across channels per valid atom.
+    per_atom_sq_err = (
+        jnp.sum(jnp.square(predicted_atom_features - target_atom_features), axis=-1) * atom_mask
     )
     # (batch,) mean squared atom feature error per molecule.
-    mse_per_mol = jnp.sum(per_atom_mse, axis=-1) / atom_counts
+    mse_per_mol = jnp.sum(per_atom_sq_err, axis=-1) / atom_counts
     factors = noise_lib.preconditioning_factors(sigma, config=config)
     return jnp.mean(factors.loss_weight * mse_per_mol)
 
@@ -145,15 +145,15 @@ def bond_feature_loss(
     atom_mask: jt.Bool[jt.Array, "batch num_atoms"],
     config: config_lib.NoiseConfig = config_lib.DEFAULT_NOISE_CONFIG,
 ) -> jt.Float[jt.Array, ""]:
-    """Computes EDM-weighted MSE on continuous one-hot bond features over valid atom pairs."""
+    """Computes EDM-weighted squared error on continuous one-hot bond features over valid pairs."""
     pair_mask = noise_lib.off_diagonal_pair_mask(atom_mask)[..., 0]
     pair_counts = jnp.maximum(jnp.sum(pair_mask, axis=(-1, -2)), 1)
-    # (batch, num_atoms, num_atoms) mean squared feature error per distinct valid atom pair.
-    per_pair_mse = (
-        jnp.mean(jnp.square(predicted_bond_features - target_bond_features), axis=-1) * pair_mask
+    # (batch, num_atoms, num_atoms) squared feature error summed across channels per valid pair.
+    per_pair_sq_err = (
+        jnp.sum(jnp.square(predicted_bond_features - target_bond_features), axis=-1) * pair_mask
     )
     # (batch,) mean squared bond feature error per molecule.
-    mse_per_mol = jnp.sum(per_pair_mse, axis=(-1, -2)) / pair_counts
+    mse_per_mol = jnp.sum(per_pair_sq_err, axis=(-1, -2)) / pair_counts
     factors = noise_lib.preconditioning_factors(sigma, config=config)
     return jnp.mean(factors.loss_weight * mse_per_mol)
 

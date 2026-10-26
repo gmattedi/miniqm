@@ -8,6 +8,7 @@ import itertools
 import re
 from typing import Final, cast, override
 
+import immutabledict
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,6 +25,9 @@ _CIP_CODE_PROP: Final = "_CIPCode"
 _UNSPECIFIED_BOND_PROP: Final = "_UnspecifiedBond"
 _BARE_URANIUM_PATTERN: Final = re.compile(r"(?<!\[)U(?!\])")
 _MASKED_LOGIT: Final = -1e9
+_BOND_ACTIVE_THRESHOLD: Final = 0.5
+_SINGLE_BOND_VALENCE: Final = 1.0
+_HALF_WEIGHT: Final = 0.5
 
 _ELEMENTS: Final = (6, 7, 8, 9)
 _DEGREES: Final = (1, 2, 3, 4)
@@ -41,8 +45,19 @@ _BOND_TYPES: Final = (
     Chem.BondType.TRIPLE,
     Chem.BondType.AROMATIC,
 )
+_MAX_VALENCE_BY_ELEMENT: Final = immutabledict.immutabledict({6: 4.0, 7: 3.0, 8: 2.0, 9: 1.0})
+_VALENCE_BY_BOND_TYPE: Final = immutabledict.immutabledict(
+    {
+        Chem.BondType.SINGLE: 1.0,
+        Chem.BondType.DOUBLE: 2.0,
+        Chem.BondType.TRIPLE: 3.0,
+        Chem.BondType.AROMATIC: 1.5,
+    }
+)
 _ELEMENT_SLICE: Final = slice(0, len(_ELEMENTS))
-_CHARGE_START: Final = len(_ELEMENTS) + (len(_DEGREES) + 1) + len(_TOTAL_HS)
+_TOTAL_HS_START: Final = len(_ELEMENTS) + (len(_DEGREES) + 1)
+_TOTAL_HS_SLICE: Final = slice(_TOTAL_HS_START, _TOTAL_HS_START + len(_TOTAL_HS))
+_CHARGE_START: Final = _TOTAL_HS_START + len(_TOTAL_HS)
 _CHARGE_SLICE: Final = slice(_CHARGE_START, _CHARGE_START + len(_FORMAL_CHARGES))
 _RING_INDEX: Final = _CHARGE_START + len(_FORMAL_CHARGES) + (len(_HYBRIDIZATIONS) + 1) + 1
 _CHIRAL_SLICE: Final = slice(_RING_INDEX + 1, _RING_INDEX + 1 + len(_CHIRAL_CODES) + 1)
@@ -142,6 +157,18 @@ class Batch:
             atom_cond_mask=jnp.asarray(self.atom_cond_mask),
             bond_cond_mask=jnp.asarray(self.bond_cond_mask),
         )
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _BondCandidate:
+    """Ranked candidate bond between two valid heavy atoms."""
+
+    is_cond_bonded: bool
+    is_order_cond: bool
+    margin: float
+    begin_idx: int
+    end_idx: int
+    bond_type: Chem.BondType
 
 
 @functools.cache
@@ -612,35 +639,206 @@ def collate_smiles(
     return _pad_graph_features(graphs, max_atoms=max_atoms)
 
 
-def _build_raw_generated_mol(
-    valid_indices: Iterable[int],
-    atom_features: np.ndarray,
-    bond_features: np.ndarray,
+@jt.typed
+def _min_conditioned_bond_valences(
+    indexed_atoms: Collection[tuple[int, int]],
     *,
-    allow_aromatic: bool,
-) -> Chem.Mol:
-    """Constructs an unsanitized RDKit molecule from decoded atom and bond argmaxes."""
-    rw_mol = Chem.RWMol()
-    indexed_atoms = tuple(enumerate(int(idx) for idx in valid_indices))
-    for _, atom_idx in indexed_atoms:
-        element_idx = int(np.argmax(atom_features[atom_idx, _ELEMENT_SLICE]))
-        charge_idx = int(np.argmax(atom_features[atom_idx, _CHARGE_SLICE]))
-        rd_atom = Chem.Atom(_ELEMENTS[element_idx])
-        rd_atom.SetFormalCharge(_FORMAL_CHARGES[charge_idx])
-        rw_mol.AddAtom(rd_atom)
-
+    cond_bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"] | None,
+    bond_cond_mask: jt.Bool[np.ndarray, "max_atoms max_atoms num_bond_features"] | None,
+) -> tuple[float, ...]:
+    """Computes the minimum heavy-atom valence required by conditioned bonds per valid atom."""
+    min_valences = [0.0] * len(indexed_atoms)
+    if cond_bond_features is None or bond_cond_mask is None:
+        return tuple(min_valences)
     num_bond_classes = len(_BOND_TYPES) + 1
     for (dst_i, src_i), (dst_j, src_j) in itertools.combinations(indexed_atoms, 2):
-        pair_logits = 0.5 * (
-            bond_features[src_i, src_j, :num_bond_classes]
-            + bond_features[src_j, src_i, :num_bond_classes]
+        if (
+            bool(bond_cond_mask[src_i, src_j, 0])
+            and float(cond_bond_features[src_i, src_j, 0]) < _BOND_ACTIVE_THRESHOLD
+        ):
+            valence = (
+                _VALENCE_BY_BOND_TYPE[
+                    _BOND_TYPES[
+                        int(np.argmax(cond_bond_features[src_i, src_j, 1:num_bond_classes]))
+                    ]
+                ]
+                if bool(bond_cond_mask[src_i, src_j, 1])
+                else _SINGLE_BOND_VALENCE
+            )
+            min_valences[dst_i] += valence
+            min_valences[dst_j] += valence
+    return tuple(min_valences)
+
+
+@jt.typed
+def _add_decoded_atoms(
+    rw_mol: Chem.RWMol,
+    indexed_atoms: Collection[tuple[int, int]],
+    *,
+    effective_atoms: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    cond_atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"] | None,
+    atom_cond_mask: jt.Bool[np.ndarray, "max_atoms num_atom_features"] | None,
+    cond_bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"] | None,
+    bond_cond_mask: jt.Bool[np.ndarray, "max_atoms max_atoms num_bond_features"] | None,
+) -> list[float]:
+    """Adds valence-compatible decoded heavy atoms and returns remaining valences."""
+    min_bond_valences = _min_conditioned_bond_valences(
+        indexed_atoms,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
+    remaining_valences: list[float] = []
+    for dst_i, src_i in indexed_atoms:
+        cond_hs = (
+            float(_TOTAL_HS[int(np.argmax(cond_atom_features[src_i, _TOTAL_HS_SLICE]))])
+            if (
+                cond_atom_features is not None
+                and atom_cond_mask is not None
+                and bool(np.all(atom_cond_mask[src_i, _TOTAL_HS_SLICE]))
+            )
+            else 0.0
         )
-        bond_class = int(np.argmax(pair_logits))
-        if bond_class > 0:
-            bond_type = _BOND_TYPES[bond_class - 1]
-            if not allow_aromatic and bond_type == Chem.BondType.AROMATIC:
-                bond_type = Chem.BondType.SINGLE
-            rw_mol.AddBond(dst_i, dst_j, bond_type)
+        required_valence = cond_hs + min_bond_valences[dst_i]
+        feasible_mask = np.array(
+            [_MAX_VALENCE_BY_ELEMENT[el] >= required_valence for el in _ELEMENTS],
+            dtype=np.bool_,
+        )
+        element_logits = np.where(
+            feasible_mask,
+            effective_atoms[src_i, _ELEMENT_SLICE],
+            _MASKED_LOGIT,
+        )
+        atomic_num = _ELEMENTS[int(np.argmax(element_logits))]
+        charge = _FORMAL_CHARGES[int(np.argmax(effective_atoms[src_i, _CHARGE_SLICE]))]
+        rd_atom = Chem.Atom(atomic_num)
+        rd_atom.SetFormalCharge(charge)
+        rw_mol.AddAtom(rd_atom)
+        remaining_valences.append(max(_MAX_VALENCE_BY_ELEMENT[atomic_num] + charge - cond_hs, 0.0))
+    return remaining_valences
+
+
+@jt.typed
+def _rank_bond_candidates(
+    indexed_atoms: Iterable[tuple[int, int]],
+    *,
+    effective_bonds: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"],
+    cond_bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"] | None,
+    bond_cond_mask: jt.Bool[np.ndarray, "max_atoms max_atoms num_bond_features"] | None,
+) -> tuple[_BondCandidate, ...]:
+    """Ranks non-excluded atom pairs by bond conditioning status and predicted logit margin."""
+    num_bond_classes = len(_BOND_TYPES) + 1
+    candidates: list[_BondCandidate] = []
+    for (dst_i, src_i), (dst_j, src_j) in itertools.combinations(indexed_atoms, 2):
+        pair_logits = _HALF_WEIGHT * (
+            effective_bonds[src_i, src_j, :num_bond_classes]
+            + effective_bonds[src_j, src_i, :num_bond_classes]
+        )
+        is_cond_pair = bond_cond_mask is not None and bool(bond_cond_mask[src_i, src_j, 0])
+        is_cond_none = (
+            is_cond_pair
+            and cond_bond_features is not None
+            and float(cond_bond_features[src_i, src_j, 0]) > _BOND_ACTIVE_THRESHOLD
+        )
+        if is_cond_none:
+            continue
+        is_order_cond = bond_cond_mask is not None and bool(bond_cond_mask[src_i, src_j, 1])
+        best_order_idx = int(np.argmax(pair_logits[1:])) + 1
+        margin = float(pair_logits[best_order_idx] - pair_logits[0])
+        candidates.append(
+            _BondCandidate(
+                is_cond_bonded=is_cond_pair,
+                is_order_cond=is_order_cond,
+                margin=margin,
+                begin_idx=dst_i,
+                end_idx=dst_j,
+                bond_type=_BOND_TYPES[best_order_idx - 1],
+            )
+        )
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.is_cond_bonded,
+                candidate.is_order_cond,
+                candidate.margin,
+            ),
+            reverse=True,
+        )
+    )
+
+
+@jt.typed
+def _build_raw_generated_mol(
+    valid_indices: Iterable[int],
+    atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"],
+    bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"],
+    *,
+    cond_atom_features: jt.Float[np.ndarray, "max_atoms num_atom_features"] | None = None,
+    atom_cond_mask: jt.Bool[np.ndarray, "max_atoms num_atom_features"] | None = None,
+    cond_bond_features: jt.Float[np.ndarray, "max_atoms max_atoms num_bond_features"] | None = None,
+    bond_cond_mask: jt.Bool[np.ndarray, "max_atoms max_atoms num_bond_features"] | None = None,
+    allow_aromatic: bool,
+) -> Chem.Mol:
+    """Constructs an unsanitized RDKit molecule respecting atomic valences and connectivity."""
+    rw_mol = Chem.RWMol()
+    indexed_atoms = tuple(enumerate(int(idx) for idx in valid_indices))
+    remaining_valences = _add_decoded_atoms(
+        rw_mol,
+        indexed_atoms,
+        effective_atoms=atom_features,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
+    ranked_candidates = _rank_bond_candidates(
+        indexed_atoms,
+        effective_bonds=bond_features,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
+    )
+
+    for candidate in ranked_candidates:
+        if not candidate.is_cond_bonded and candidate.margin <= 0.0:
+            continue
+        bond_type = candidate.bond_type
+        if (
+            not allow_aromatic
+            and not candidate.is_order_cond
+            and bond_type == Chem.BondType.AROMATIC
+        ):
+            bond_type = Chem.BondType.SINGLE
+        valence = _VALENCE_BY_BOND_TYPE[bond_type]
+        begin_idx = candidate.begin_idx
+        end_idx = candidate.end_idx
+        if not candidate.is_order_cond and (
+            remaining_valences[begin_idx] < valence or remaining_valences[end_idx] < valence
+        ):
+            bond_type = Chem.BondType.SINGLE
+            valence = _SINGLE_BOND_VALENCE
+        if candidate.is_cond_bonded or (
+            remaining_valences[begin_idx] >= valence and remaining_valences[end_idx] >= valence
+        ):
+            rw_mol.AddBond(begin_idx, end_idx, bond_type)
+            remaining_valences[begin_idx] -= valence
+            remaining_valences[end_idx] -= valence
+
+    for candidate in ranked_candidates:
+        fragments = Chem.GetMolFrags(rw_mol)
+        if len(fragments) <= 1:
+            break
+        begin_idx = candidate.begin_idx
+        end_idx = candidate.end_idx
+        in_same_fragment = any(begin_idx in frag and end_idx in frag for frag in fragments)
+        if (
+            not in_same_fragment
+            and remaining_valences[begin_idx] >= _SINGLE_BOND_VALENCE
+            and remaining_valences[end_idx] >= _SINGLE_BOND_VALENCE
+        ):
+            rw_mol.AddBond(begin_idx, end_idx, Chem.BondType.SINGLE)
+            remaining_valences[begin_idx] -= _SINGLE_BOND_VALENCE
+            remaining_valences[end_idx] -= _SINGLE_BOND_VALENCE
+
     return rw_mol.GetMol()
 
 
@@ -697,6 +895,10 @@ def build_generated_mol(
         valid_indices,
         effective_atoms,
         effective_bonds,
+        cond_atom_features=cond_atom_features,
+        atom_cond_mask=atom_cond_mask,
+        cond_bond_features=cond_bond_features,
+        bond_cond_mask=bond_cond_mask,
         allow_aromatic=True,
     )
     if Chem.SanitizeMol(mol, catchErrors=True) != Chem.SanitizeFlags.SANITIZE_NONE:
@@ -704,6 +906,10 @@ def build_generated_mol(
             valid_indices,
             effective_atoms,
             effective_bonds,
+            cond_atom_features=cond_atom_features,
+            atom_cond_mask=atom_cond_mask,
+            cond_bond_features=cond_bond_features,
+            bond_cond_mask=bond_cond_mask,
             allow_aromatic=False,
         )
         Chem.SanitizeMol(mol, catchErrors=True)

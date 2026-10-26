@@ -17,6 +17,11 @@ from miniqm.diffusion import noise as noise_lib
 _LOGGER: Final = logging.getLogger(__name__)
 
 _SPATIAL_DIMS: Final = 3
+_NUM_RBF: Final = 16
+# Covalent and non-bonded heavy-atom distance range in Angstroms for radial basis expansion.
+_RBF_MIN_DIST: Final = 0.8
+_RBF_MAX_DIST: Final = 3.2
+_NUM_GEOM_FEATURES: Final = _SPATIAL_DIMS + 1 + _NUM_RBF
 _MASK_FILL_VALUE: Final = -1e9
 # Prevents infinite gradient of sqrt(r^2) at zero interatomic distance.
 _DIST_EPS: Final = 1e-8
@@ -169,20 +174,29 @@ class Denoiser(nn.Module):
             sigma_data=self.config.noise.sigma_data,
             config=self.config.fourier,
         )
+        # (batch, 1) fraction of active atom slots per molecule for size conditioning.
+        atom_fraction = jnp.sum(batch.atom_mask, axis=-1, keepdims=True) / max(num_atoms, 1)
+        sigma_inputs = jnp.concatenate((fourier_sigma, atom_fraction), axis=-1)
         noise_cond = nn.Dense(transformer_config.hidden_dim, name="sigma_mlp_1")(
-            nn.silu(nn.Dense(transformer_config.hidden_dim, name="sigma_mlp_0")(fourier_sigma))
+            nn.silu(nn.Dense(transformer_config.hidden_dim, name="sigma_mlp_0")(sigma_inputs))
         )
 
+        atom_indices = jnp.arange(num_atoms)
         atom_inputs = jnp.concatenate(
             (scaled_atoms, cond_atom_features, cond_atom_mask),
             axis=-1,
         )
-        # (batch, num_atoms, hidden_dim) separate 2D atom and 3D coordinate projections.
+        # (batch, num_atoms, hidden_dim) 2D atom, 3D coordinate, and sequence-index projections.
         act = (
             nn.Dense(transformer_config.hidden_dim, name="atom_proj")(atom_inputs)
             + nn.Dense(transformer_config.hidden_dim, use_bias=False, name="pos_proj")(
                 scaled_positions
             )
+            + nn.Embed(
+                batch_lib.MAX_ATOMS,
+                transformer_config.hidden_dim,
+                name="atom_index_embed",
+            )(atom_indices)[None, :, :]
             + noise_cond[:, None, :]
         ) * mask_3d
 
@@ -194,9 +208,15 @@ class Denoiser(nn.Module):
             )
             * pair_mask
         )
-        pair_hidden = nn.silu(
-            nn.Dense(pair_dim, name="pair_mlp_0")(geom_inputs)
-            + nn.Dense(pair_dim, use_bias=False, name="pair_bond_proj")(bond_inputs)
+        init_node_pair = nn.Dense(pair_dim, use_bias=False, name="pair_init_node_proj")(act)
+        pair_hidden = (
+            nn.silu(
+                nn.Dense(pair_dim, name="pair_mlp_0")(geom_inputs)
+                + nn.Dense(pair_dim, use_bias=False, name="pair_bond_proj")(bond_inputs)
+                + init_node_pair[:, :, None, :]
+                + init_node_pair[:, None, :, :]
+            )
+            * pair_mask
         )
         pair_biases = nn.Dense(
             transformer_config.num_layers * transformer_config.num_heads,
@@ -223,15 +243,6 @@ class Denoiser(nn.Module):
         raw_positions = nn.Dense(_SPATIAL_DIMS, name="coord_head")(norm_act)
         raw_atoms = nn.Dense(batch_lib.NUM_ATOM_FEATURES, name="atom_head")(norm_act)
 
-        node_pair_proj = nn.Dense(pair_dim, name="pair_node_proj")(norm_act)
-        # (batch, num_atoms, num_atoms, pair_dim) symmetric pairwise activations for bond logits.
-        pair_act = nn.silu(
-            pair_hidden + node_pair_proj[:, :, None, :] + node_pair_proj[:, None, :, :]
-        )
-        sym_pair_act = _HALF_WEIGHT * (pair_act + jnp.swapaxes(pair_act, 1, 2))
-        raw_bonds = nn.Dense(batch_lib.NUM_BOND_FEATURES, name="bond_head")(sym_pair_act)
-        raw_bonds = _HALF_WEIGHT * (raw_bonds + jnp.swapaxes(raw_bonds, 1, 2))
-
         # (batch, 1, 1) and (batch, 1, 1, 1) broadcastable skip and output scaling factors.
         c_skip_atom = factors.c_skip[:, None, None]
         c_out_atom = factors.c_out[:, None, None]
@@ -243,6 +254,22 @@ class Denoiser(nn.Module):
             batch.atom_mask,
         )
         denoised_atoms = (c_skip_atom * noisy_atom_features + c_out_atom * raw_atoms) * mask_3d
+
+        node_sum_proj = nn.Dense(pair_dim, name="pair_node_proj")(norm_act)
+        node_prod_proj = nn.Dense(pair_dim, use_bias=False, name="pair_prod_proj")(norm_act)
+        denoised_geom = _pairwise_geometry_features(denoised_positions, pair_mask)
+        # (batch, num_atoms, num_atoms, pair_dim) symmetric pairwise activations for bond logits.
+        pair_act = nn.silu(
+            pair_hidden
+            + node_sum_proj[:, :, None, :]
+            + node_sum_proj[:, None, :, :]
+            + node_prod_proj[:, :, None, :] * node_prod_proj[:, None, :, :]
+            + nn.Dense(pair_dim, use_bias=False, name="denoised_geom_proj")(denoised_geom)
+        )
+        sym_pair_act = _HALF_WEIGHT * (pair_act + jnp.swapaxes(pair_act, 1, 2))
+        bond_hidden = nn.silu(nn.Dense(pair_dim, name="bond_mlp")(sym_pair_act))
+        raw_bonds = nn.Dense(batch_lib.NUM_BOND_FEATURES, name="bond_head")(bond_hidden)
+        raw_bonds = _HALF_WEIGHT * (raw_bonds + jnp.swapaxes(raw_bonds, 1, 2))
         denoised_bonds = (c_skip_pair * noisy_bond_features + c_out_pair * raw_bonds) * pair_mask
 
         return DenoiserOutput(
@@ -272,12 +299,16 @@ def _fourier_noise_embedding(
 
 @jt.typed
 def _pairwise_geometry_features(
-    scaled_positions: jt.Float[jt.Array, "batch num_atoms 3"],
+    positions: jt.Float[jt.Array, "batch num_atoms 3"],
     pair_mask: jt.Bool[jt.Array, "batch num_atoms num_atoms 1"],
-) -> jt.Float[jt.Array, "batch num_atoms num_atoms 4"]:
-    """Computes masked 3D pairwise displacement vectors and Euclidean distances."""
+) -> jt.Float[jt.Array, f"batch num_atoms num_atoms {_NUM_GEOM_FEATURES}"]:
+    """Computes masked 3D pairwise displacements, distances, and Gaussian RBF features."""
     # (batch, num_atoms, num_atoms, 3) pairwise displacement vectors x_i - x_j.
-    offsets = scaled_positions[:, :, None, :] - scaled_positions[:, None, :, :]
+    offsets = positions[:, :, None, :] - positions[:, None, :, :]
     # (batch, num_atoms, num_atoms, 1) pairwise Euclidean distances ||x_i - x_j||.
     distances = jnp.sqrt(jnp.sum(jnp.square(offsets), axis=-1, keepdims=True) + _DIST_EPS)
-    return jnp.concatenate((offsets, distances), axis=-1) * pair_mask
+    centers = jnp.linspace(_RBF_MIN_DIST, _RBF_MAX_DIST, _NUM_RBF)
+    rbf_width = (_RBF_MAX_DIST - _RBF_MIN_DIST) / (_NUM_RBF - 1)
+    # (batch, num_atoms, num_atoms, _NUM_RBF) Gaussian radial basis expansion.
+    rbf = jnp.exp(-_HALF_WEIGHT * jnp.square((distances - centers) / rbf_width))
+    return jnp.concatenate((offsets, distances, rbf), axis=-1) * pair_mask

@@ -52,7 +52,7 @@ class NoiseConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     rho: pydantic.PositiveInt = 7
     log_sigma_mean: float = -1.2
     log_sigma_std: pydantic.PositiveFloat = 1.5
-    uncond_prob: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] = 0.25
+    uncond_prob: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] = 0.35
     partial_cond_prob: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] = 0.25
 
     @pydantic.model_validator(mode="after")
@@ -131,7 +131,7 @@ class LossConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     distance_loss_weight: pydantic.NonNegativeFloat = 0.25
     distance_cutoff: pydantic.PositiveFloat = 5.0
     atom_loss_weight: pydantic.NonNegativeFloat = 0.25
-    bond_loss_weight: pydantic.NonNegativeFloat = 0.25
+    bond_loss_weight: pydantic.NonNegativeFloat = 0.5
 
 
 class SamplingConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
@@ -146,10 +146,10 @@ class SamplingConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     """
 
     num_steps: pydantic.PositiveInt = 40
-    gamma_0: pydantic.NonNegativeFloat = 0.8
+    gamma_0: pydantic.NonNegativeFloat = 0.25
     gamma_min: pydantic.NonNegativeFloat = 0.1
     noise_scale: pydantic.NonNegativeFloat = 1.003
-    step_scale: pydantic.PositiveFloat = 1.5
+    step_scale: pydantic.PositiveFloat = 1.0
 
 
 class TrainConfig(pydantic.BaseModel, frozen=True, extra="forbid"):

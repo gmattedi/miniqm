@@ -411,6 +411,72 @@ def test_build_generated_mol_reconstructs_rdkit_conformer():
     )
 
 
+def test_build_generated_mol_enforces_valence_and_connects_unconditioned_fragments():
+    template = batch.featurize_smiles("U~U(=U)")
+    positions = np.array(
+        [[0.0, 0.0, 0.0], [1.4, 0.0, 0.0], [2.7, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    atom_features = np.zeros((3, batch.NUM_ATOM_FEATURES), dtype=np.float32)
+    # Neutral formal charge (channel 15 = 1.0) on all three atoms.
+    atom_features[:, 15] = 1.0
+    # Atom 0 prefers C (channel 0); Atom 1 prefers F (channel 3, valence 1) then N
+    # (channel 1, valence 3); Atom 2 prefers O (channel 2, valence 2).
+    atom_features[0, :4] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    atom_features[1, :4] = np.array([0.2, 0.8, 0.9, 1.0], dtype=np.float32)
+    atom_features[2, :4] = np.array([0.1, 0.2, 1.0, 0.0], dtype=np.float32)
+
+    bond_features = np.zeros((3, 3, batch.NUM_BOND_FEATURES), dtype=np.float32)
+    # Pair (0, 1) is ~ bonded; model prefers DOUBLE (channel 2), which would exceed N's remaining
+    # valence of 1.0 after the conditioned = bond on (1, 2), so it is demoted to SINGLE.
+    bond_features[0, 1, :5] = np.array([0.0, 0.4, 0.9, 0.0, 0.0], dtype=np.float32)
+    bond_features[1, 0, :5] = bond_features[0, 1, :5]
+    # Unconditioned pair (0, 2) also predicts SINGLE, which would over-saturate O (atom 2).
+    bond_features[0, 2, :5] = np.array([0.1, 0.9, 0.0, 0.0, 0.0], dtype=np.float32)
+    bond_features[2, 0, :5] = bond_features[0, 2, :5]
+    atom_mask = np.array([True, True, True], dtype=np.bool_)
+
+    mol = batch.build_generated_mol(
+        positions,
+        atom_features,
+        bond_features,
+        atom_mask,
+        cond_atom_features=template.atom_features,
+        atom_cond_mask=template.atom_cond_mask,
+        cond_bond_features=template.bond_features,
+        bond_cond_mask=template.bond_cond_mask,
+        prompt_smiles="U~U(=U)",
+    )
+
+    assert mol.GetProp(batch.SdfProperty.SMILES) == "CN=O"
+
+    # Unconditioned U.U.U where (0, 1) has margin > 0 and (1, 2) has the best sub-threshold bridge.
+    uncond = batch.featurize_smiles("U.U.U")
+    uncond_bonds = np.zeros((3, 3, batch.NUM_BOND_FEATURES), dtype=np.float32)
+    uncond_bonds[:, :, 0] = 0.8
+    uncond_bonds[0, 1, :2] = np.array([0.1, 0.9], dtype=np.float32)
+    uncond_bonds[1, 0, :2] = uncond_bonds[0, 1, :2]
+    uncond_bonds[1, 2, :2] = np.array([0.55, 0.45], dtype=np.float32)
+    uncond_bonds[2, 1, :2] = uncond_bonds[1, 2, :2]
+    uncond_atoms = np.zeros((3, batch.NUM_ATOM_FEATURES), dtype=np.float32)
+    uncond_atoms[:, 0] = 1.0
+    uncond_atoms[:, 15] = 1.0
+
+    connected_mol = batch.build_generated_mol(
+        positions,
+        uncond_atoms,
+        uncond_bonds,
+        atom_mask,
+        cond_atom_features=uncond.atom_features,
+        atom_cond_mask=uncond.atom_cond_mask,
+        cond_bond_features=uncond.bond_features,
+        bond_cond_mask=uncond.bond_cond_mask,
+        prompt_smiles="U.U.U",
+    )
+
+    assert connected_mol.GetProp(batch.SdfProperty.SMILES) == "CCC"
+
+
 @pytest.mark.parametrize(
     ("fn", "arg", "max_atoms", "error_match"),
     (
