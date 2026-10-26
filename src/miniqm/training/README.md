@@ -4,7 +4,7 @@
 
 `miniqm.training` manages optimization state, multi-device CPU batch sharding, periodic validation, conformer sampling benchmarks, and MessagePack checkpointing:
 
-* `train.py` defines `TrainState` and runs the compiled training step (`train_step`) with global-norm-clipped AdamW (`warmup_cosine_decay_schedule`), shards training batches across logical XLA CPU devices via `NamedSharding`, and updates exponential moving average (`ema_params`) weights at every step.
-* `train.py` writes each training run into a timestamped subdirectory (`<run_dir>/<YYYYMMDD_HHMMSS>/`), logs submodule parameter counts and a Flax `tabulate` summary table, displays a live Rich progress bar, logs scalar metrics (coordinate, distance, atom, and bond losses) to TensorBoard and `metrics.jsonl`, and saves `best.msgpack` when validation `sampled_lddt_mean` improves.
-* `eval.py` implements molecule-weighted validation loss evaluation (`evaluate_loss`), validation conformer sampling (`evaluate_dataset_sampling`), full-split test evaluation (`run_evaluation`), and multi-conformer SMILES/template-to-3D SDF generation (`run_smiles_sampling`).
-* `checkpoint.py` resolves direct or timestamped parent run directories (`resolve_run_dir`), serializes and restores `Checkpoint` states (`step`, `params`, `ema_params`) via `flax.serialization` with atomic file replacement, and reconstructs full `LoadedRun` bundles from `config.json`.
+* Runs the compiled training step with global-norm-clipped AdamW and a warmup cosine decay schedule, shards batches across logical XLA CPU devices, and updates exponential moving average (EMA) weights at every step.
+* Writes each training run into a timestamped subdirectory, logs parameter counts and scalar loss components to TensorBoard and JSON Lines, and saves the best checkpoint when mean validation sampled lDDT improves.
+* Evaluates molecule-weighted validation losses, validation conformer sampling metrics, full test-split benchmarks, and multi-conformer SMILES/template-to-3D SDF generation.
+* Resolves direct or timestamped parent run directories and serializes model and EMA parameters with atomic file replacement.
