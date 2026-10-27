@@ -1,0 +1,59 @@
+{
+  "train_path": "data/train.parquet",
+  "val_path": "data/validation.parquet",
+  "run_dir": "pretrained_weights",
+  "train": {
+    "model": {
+      "transformer": {
+        "hidden_dim": 128,
+        "num_layers": 4,
+        "num_heads": 4,
+        "mlp_factor": 4
+      },
+      "fourier": {
+        "log_sigma_scale": 0.25,
+        "max_period": 100.0
+      },
+      "noise": {
+        "sigma_data": 1.2,
+        "s_min": 0.0004,
+        "s_max": 80.0,
+        "rho": 7,
+        "log_sigma_mean": -1.2,
+        "log_sigma_std": 1.5,
+        "uncond_prob": 0.35,
+        "partial_cond_prob": 0.25
+      }
+    },
+    "loss": {
+      "distance_loss_weight": 0.25,
+      "distance_cutoff": 5.0,
+      "atom_loss_weight": 0.25,
+      "bond_loss_weight": 0.5
+    },
+    "learning_rate": 0.0003,
+    "warmup_steps": 1000,
+    "decay_steps": 100000,
+    "min_learning_rate": 0.00001,
+    "weight_decay": 0.0001,
+    "max_grad_norm": 1.0,
+    "ema_decay": 0.999
+  },
+  "sampling": {
+    "num_steps": 40,
+    "gamma_0": 0.25,
+    "gamma_min": 0.1,
+    "noise_scale": 1.003,
+    "step_scale": 1.0
+  },
+  "batch_size": 64,
+  "num_steps": 100000,
+  "log_every": 50,
+  "eval_every": 500,
+  "sample_every": 1000,
+  "max_train_molecules": null,
+  "max_val_molecules": 512,
+  "sample_batch_size": 32,
+  "num_devices": 8,
+  "seed": 0
+}
