@@ -1,74 +1,16 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the repository structure, CLI behavior, and modeling pipeline whenever code changes. -->
-
 # miniqm
 
-`miniqm` is a compact JAX, Flax, and Optax implementation of joint 2D+3D molecular diffusion on heavy-atom QM9 graphs.
+`miniqm` is a small JAX/Flax diffusion model that generates QM9 molecules in 2D and 3D at the same time.
 
-Instead of using specialized $\mathrm{SE}(3)$-equivariant layers, a standard pair-biased Transformer denoises 3D Cartesian coordinates in $\mathbb{R}^3$, one-hot heavy-atom features, and one-hot bond features jointly under Karras EDM preconditioning. Per-channel conditioning masks allow the same checkpoint to perform 3D conformer generation from full SMILES, scaffold-constrained 2D+3D completion from partial templates, and unconditional de novo molecule generation.
-
-![Reverse diffusion rollout](assets/reverse_diffusion.gif)
-
-## Representation & Conditioning
-
-Each QM9 molecule is stripped of explicit hydrogens and padded to $N$ heavy atoms:
-
-* Coordinates $\mathbf{x} \in \mathbb{R}^{N \times 3}$ hold zero-center-of-mass Cartesian positions in Angstroms. During training, each molecule is rotated by a uniform random proper rotation $R \in \mathrm{SO}(3)$ sampled via Gram-Schmidt orthogonalization.
-* Atom features $\mathbf{a} \in \{0, 1\}^{N \times D_{\mathrm{atom}}}$ concatenate one-hot blocks for heavy-atom element, total degree, total attached hydrogens, formal charge, hybridization, aromaticity, ring membership, and 3D Cahn-Ingold-Prelog ($R$/$S$) stereochemistry.
-* Bond features $\mathbf{b} \in \{0, 1\}^{N \times N \times D_{\mathrm{bond}}}$ form a symmetric pair tensor encoding bond order and ring membership.
-
-Boolean conditioning masks over the atom and bond feature channels control which 2D attributes are known. Unconditioned channels are zeroed in the conditioning input and denoised from Gaussian noise alongside coordinates. During training, each molecule is assigned one of three conditioning regimes:
-
-* Full 2D graph conditioning. All atom and bond channels are known, and the model predicts 3D conformer coordinates.
-* Partial subgraph conditioning. A random subset of atoms and incident bonds is masked out.
-* Unconditional generation. Only the valid-atom count mask is given, and both the 2D graph and 3D coordinates are denoised from scratch.
-
-At inference time, SMILES or SMARTS strings are parsed into the same mask format using `U` (or `*`) for unconditioned atoms and `~` for unconditioned bonds:
+Given a molecule with up to 9 heavy atoms (C, N, O, F), the model jointly denoises 3D Cartesian coordinates, one-hot atom features, and one-hot bond features. By masking out different parts of the 2D graph, the same checkpoint handles three tasks:
 
 ```text
-"CCO"               -> full 2D conditioning (conformer generation)
-"c1ccccc1~U~U(=U)"  -> phenyl ring fixed; substituent atoms and ~ bonds denoised
-"U.U.U.U.U"         -> unconditioned heavy atoms; full 2D+3D de novo generation
+"CCO"               -> 3D conformer generation from a full SMILES string
+"c1ccccc1~U~U(=U)"  -> scaffold completion (phenyl ring fixed; U atoms and ~ bonds denoised)
+"U.U.U.U.U"         -> unconditional 2D+3D molecule generation from dummy atoms
 ```
 
-For full SMILES prompts, sampled 3D coordinates are attached directly to the input RDKit graph. For partial or unconditional templates, continuous bond and atom predictions are decoded into a valence-consistent RDKit molecule. The decoder combines 2D bond logits with interatomic distances to suppress long-range false bonds, enforces per-atom bond-order capacities, and adjusts elements when needed to satisfy open valences.
-
-## Diffusion Formulation
-
-### Karras EDM Preconditioning
-
-Given noise level $\sigma > 0$ and data standard deviation $\sigma_{\mathrm{data}}$, the preconditioning coefficients are
-
-$$c_{\mathrm{skip}}(\sigma) = \frac{\sigma_{\mathrm{data}}^2}{\sigma^2 + \sigma_{\mathrm{data}}^2}, \quad c_{\mathrm{out}}(\sigma) = \frac{\sigma \cdot \sigma_{\mathrm{data}}}{\sqrt{\sigma^2 + \sigma_{\mathrm{data}}^2}}, \quad c_{\mathrm{in}}(\sigma) = \frac{1}{\sqrt{\sigma^2 + \sigma_{\mathrm{data}}^2}}, \quad \lambda(\sigma) = \frac{\sigma^2 + \sigma_{\mathrm{data}}^2}{(\sigma \cdot \sigma_{\mathrm{data}})^2}.$$
-
-Training samples $\ln \sigma$ from a normal distribution clipped to $[\sigma_{\min}, \sigma_{\max}]$. Independent Gaussian noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \sigma^2 \mathbf{I})$ is added to coordinates (zero-centered over valid atoms) and to unconditioned atom and symmetric bond channels. The denoiser $D_\theta$ on $z = (\mathbf{x}, \mathbf{a}, \mathbf{b})$ is parameterized as
-
-$$D_\theta(z_t, \sigma) = c_{\mathrm{skip}}(\sigma)\, z_t + c_{\mathrm{out}}(\sigma)\, F_\theta\!\left(c_{\mathrm{in}}(\sigma)\, z_t,\, \frac{1}{4}\ln \sigma\right).$$
-
-### Pair-Biased Transformer Architecture
-
-$F_\theta$ operates on atom tokens $h_i \in \mathbb{R}^{d}$ and pair representations $p_{ij} \in \mathbb{R}^{d}$:
-
-* Atom embeddings sum linear projections of scaled noisy coordinates $c_{\mathrm{in}}(\sigma)\mathbf{x}_i$, scaled noisy atom features, masked ground-truth conditioning features, and the binary conditioning mask.
-* Pair embeddings sum linear projections of scaled noisy bond features, conditioned bond features, pairwise coordinate displacements $c_{\mathrm{in}}(\sigma)(\mathbf{x}_i - \mathbf{x}_j)$, and interatomic distances $\|c_{\mathrm{in}}(\sigma)(\mathbf{x}_i - \mathbf{x}_j)\|_2$.
-* A sinusoidal Fourier encoder maps $\frac{1}{4}\ln \sigma$ into a conditioning vector. Zero-initialized adaptive LayerNorm scale, shift, and residual gates modulate the pre-norm Transformer blocks with this vector.
-* Each Transformer block biases multi-head self-attention logits with a learned projection of $p_{ij}$ and updates atom tokens through a gated SiLU MLP. Pair representations are updated via outer sums of projected atom tokens and symmetrized as $p_{ij} \leftarrow \frac{1}{2}(p_{ij} + p_{ji})$.
-* Output heads project final atom tokens to coordinate updates (re-centered to zero center of mass) and atom logits, and project final pair tokens to symmetric bond logits.
-
-### Training Loss & Reverse Sampling
-
-The training objective combines four terms weighted by $\lambda(\sigma)$:
-
-$$\mathcal{L} = \mathcal{L}_{\mathrm{coord}} + w_{\mathrm{dist}}\,\mathcal{L}_{\mathrm{dist}} + w_{\mathrm{atom}}\,\mathcal{L}_{\mathrm{atom}} + w_{\mathrm{bond}}\,\mathcal{L}_{\mathrm{bond}}$$
-
-* $\mathcal{L}_{\mathrm{coord}}$ is the EDM-weighted MSE between predicted coordinates $\hat{\mathbf{x}}_0$ and ground-truth coordinates $\mathbf{x}_0^{\mathrm{aligned}}$ rigid-body aligned onto $\mathrm{stop\_gradient}(\hat{\mathbf{x}}_0)$ via Kabsch SVD ($\det R = +1$).
-* $\mathcal{L}_{\mathrm{dist}}$ is an auxiliary MSE on local pairwise interatomic distances.
-* $\mathcal{L}_{\mathrm{atom}}$ and $\mathcal{L}_{\mathrm{bond}}$ are EDM-weighted MSE losses on the continuous one-hot atom and bond targets.
-
-At inference time, reverse integration steps through the polynomial noise schedule:
-
-$$\sigma_i = \left(\sigma_{\max}^{1/\rho} + \frac{i}{N_{\mathrm{steps}} - 1}\left(\sigma_{\min}^{1/\rho} - \sigma_{\max}^{1/\rho}\right)\right)^\rho.$$
-
-Each step applies an Euler update with optional Karras stochastic churn. Conditioned 2D channels are re-pinned after the final denoising step.
+![Reverse diffusion rollout](assets/reverse_diffusion.gif)
 
 ## Quickstart
 
@@ -79,36 +21,45 @@ uv sync
 uv run python data/download_qm9.py
 ```
 
-### Sampling & Evaluation with Pretrained Weights
+### Sample Molecules & Evaluate
 
-`miniqm-sample` and `miniqm-eval` load the pretrained checkpoint in `pretrained_weights/` by default:
+`miniqm-sample` and `miniqm-eval` use the pretrained checkpoint in `pretrained_weights/` by default:
 
 ```bash
-# Sample 3D conformers and 2D+3D molecules from full SMILES, partial templates, or dummy atoms:
+# Sample 3D conformers and 2D+3D molecules into an SDF file:
 uv run miniqm-sample \
     --smiles CCO c1ccccc1 "c1ccccc1~U~U(=U)" "U.U.U.U.U" \
     --num-conformers 5 \
     --output-sdf sampled_conformers.sdf
 
-# Evaluate teacher-forced loss and sampled conformer RMSD / lDDT on the test split:
+# Evaluate test-split losses and sampled conformer RMSD, lDDT, and stereochemistry:
 uv run miniqm-eval
 ```
 
-### Training From Scratch
+### Train from Scratch
 
-Launch a training run sharded across logical XLA CPU devices:
+Launch a training run sharded across logical CPU devices:
 
 ```bash
 uv run miniqm-train --run-dir runs/qm9_experiment
 ```
 
-Pass `--run-dir runs/qm9_experiment` to `miniqm-sample` or `miniqm-eval` to evaluate a custom run. Both commands automatically resolve the latest timestamped run directory inside the given path.
+Pass `--run-dir runs/qm9_experiment` to `miniqm-sample` or `miniqm-eval` to use a custom run. Both commands automatically pick the latest timestamped run directory inside the given path.
+
+## How It Works
+
+* Explicit hydrogens are stripped, leaving heavy atoms padded to a fixed size. Each molecule is represented by zero-centered 3D coordinates, one-hot atom features (element, degree, attached H count, formal charge, hybridization, aromaticity, ring membership, and $R$/$S$ stereochemistry), and symmetric one-hot bond features (bond order and ring membership).
+* Boolean masks over the atom and bond channels specify which parts of the 2D graph are known. During training, each molecule is randomly assigned full 2D conditioning, partial subgraph conditioning, or no 2D conditioning. At inference, SMILES/SMARTS prompts use `U` (or `*`) for unknown atoms and `~` for bonds of unknown order.
+* Training samples log-normal noise levels $\sigma$ and adds Gaussian noise to coordinates, atom features, and symmetric bond features. The network uses Karras EDM preconditioning ($c_{\mathrm{in}}, c_{\mathrm{skip}}, c_{\mathrm{out}}$), and reverse sampling integrates an Euler trajectory with optional stochastic churn.
+* Rather than using $\mathrm{SE}(3)$-equivariant layers, the denoiser is a standard Transformer with pairwise attention biases. Atom tokens embed noisy coordinates, noisy and conditioned atom features, atom index, and noise level. Pair representations combine noisy and conditioned bond features with 3D pairwise displacements, distances, and Gaussian radial basis functions to produce attention biases for every layer and symmetric bond predictions at the output.
+* Target coordinates are randomly rotated in 3D during training. The coordinate loss aligns the ground-truth conformer onto the detached prediction via Kabsch SVD (restricted to proper rotations, $\det R = +1$, to preserve chirality) and combines EDM-weighted coordinate MSE, local pairwise distance MSE, and atom/bond feature MSE.
+* For full SMILES inputs, sampled 3D coordinates are attached directly to the RDKit graph. For partial or unconditional prompts, predicted atom and bond logits are decoded greedily into a valence-valid RDKit molecule.
 
 ## Interactive Notebooks
 
-The `notebooks/` directory walks through each stage of the pipeline with 2D RDKit drawings and interactive `py3Dmol` 3D viewers:
+The `notebooks/` directory walks through each part of the pipeline with 2D RDKit drawings and interactive `py3Dmol` 3D viewers:
 
-* Loading pre-collated QM9 batches, inspecting heavy-atom count and RMS radius distributions, and plotting 2D molecular graphs and bond adjacency matrices.
-* Center-of-mass zeroing, uniform random 3D rotations, proper-rotation Kabsch alignment, and mirror-enantiomer chirality preservation.
-* Karras EDM preconditioning curves, single-batch denoiser training convergence, and animated 3D reverse-diffusion trajectories.
-* Evaluating the pretrained checkpoint on test-set conformer RMSD and lDDT, and animating 3D trajectories for full SMILES (`CCO`), partial templates (`c1ccccc1~U~U(=U)`), and de novo generation (`U.U.U.U.U`).
+* QM9 batch loading, heavy-atom count and radius distributions, and 2D molecular graph featurization.
+* Center-of-mass zeroing, random 3D rotations, chirality preservation, and Kabsch alignment.
+* Karras EDM preconditioning curves, single-batch training convergence, and animated 3D reverse-diffusion trajectories.
+* Test-set evaluation and animated 2D+3D sampling trajectories for full SMILES (`CCO`), partial scaffolds (`c1ccccc1~U~U(=U)`), and unconditional generation (`U.U.U.U.U`).

@@ -1,5 +1,3 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the schema, featurization, and batching logic in this directory whenever code changes. -->
-
 # Data Loading & 2D Molecular Featurization
 
 `miniqm.data` loads QM9 splits, aligns heavy-atom RDKit molecular graphs to 3D coordinate atom orderings, and collates padded JAX batches:

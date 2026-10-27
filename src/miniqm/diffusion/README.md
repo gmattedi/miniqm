@@ -1,5 +1,3 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the geometry, noise, model, loss, and sampling implementations in this directory whenever code changes. -->
-
 # Joint 2D+3D Molecular Diffusion
 
 `miniqm.diffusion` implements Karras EDM joint diffusion over 3D Cartesian coordinates and continuous one-hot 2D atom and bond features:

@@ -1,5 +1,3 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the package layout and top-level utilities in this directory whenever code changes. -->
-
 # miniqm Package
 
 `miniqm` is a JAX library for heavy-atom QM9 graph featurization, Karras EDM joint 2D+3D molecular diffusion, Optax training, and interactive 3D molecular visualization:

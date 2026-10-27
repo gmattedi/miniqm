@@ -1,5 +1,3 @@
-<!-- AGENT NOTICE: Keep this README synchronized with the training, evaluation, and checkpointing implementations in this directory whenever code changes. -->
-
 # Training, Evaluation & Checkpointing
 
 `miniqm.training` manages optimization state, multi-device CPU batch sharding, periodic validation, conformer sampling benchmarks, and MessagePack checkpointing:
