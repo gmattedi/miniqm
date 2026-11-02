@@ -2,6 +2,9 @@
 
 `miniqm` is a small JAX/Flax diffusion model that generates QM9 molecules in 2D and 3D at the same time.
 
+This is a small model built to demonstrate how basic diffusion models can be used for ligand conformer generation and generative chemistry tasks,
+please consider this an academic exercise rather than a tool that can be relied on.
+
 Given a molecule with up to 9 heavy atoms (C, N, O, F), the model jointly denoises 3D Cartesian coordinates, one-hot atom features, and one-hot bond features. By masking out different parts of the 2D graph, the same checkpoint handles three tasks:
 
 ```text
